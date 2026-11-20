@@ -1,5 +1,6 @@
 package com.jpb.inkdrift
 
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -24,7 +25,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.withTransform
@@ -33,6 +33,13 @@ import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.unit.dp
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import com.jpb.inkdrift.util.CanvasStroke
+import com.jpb.inkdrift.util.CanvasStrokePoint
+import com.jpb.inkdrift.util.StorableStroke
+import com.jpb.inkdrift.util.toCanvasStroke
+import com.jpb.inkdrift.util.toStorable
 import kotlinx.coroutines.launch
 import java.util.UUID
 import kotlin.math.ceil
@@ -41,6 +48,10 @@ import kotlin.math.hypot
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val prefs = getSharedPreferences("inkdrift_prefs", Context.MODE_PRIVATE)
+        val gson = Gson()
+
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -54,43 +65,19 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    FreeformAppRoot()
+                    FreeformAppRoot(prefs, gson)
                 }
             }
         }
     }
 }
 
-// --- APP NAVIGATION ROUTING ---
+// --- APP NAVIGATION & DATA MODELS ---
 
 sealed class AppScreen {
     data object Dashboard : AppScreen()
     data class Studio(val boardId: String, val boardTitle: String) : AppScreen()
 }
-
-@Composable
-fun FreeformAppRoot() {
-    var currentScreen by remember { mutableStateOf<AppScreen>(AppScreen.Dashboard) }
-
-    when (val screen = currentScreen) {
-        is AppScreen.Dashboard -> {
-            FreeformMainDashboardScreen(
-                onBoardClick = { boardId, title ->
-                    currentScreen = AppScreen.Studio(boardId, title)
-                }
-            )
-        }
-        is AppScreen.Studio -> {
-            FreeformStudioCanvasScreen(
-                boardTitle = screen.boardTitle,
-                onBack = { currentScreen = AppScreen.Dashboard }
-            )
-        }
-    }
-}
-
-
-// --- 1. DASHBOARD SCREEN & MODELS ---
 
 data class FreeformBoard(
     val id: String,
@@ -98,27 +85,110 @@ data class FreeformBoard(
     val subtitle: String
 )
 
-enum class FreeformCategory(val label: String, val icon: ImageVector, val count: Int) {
-    ALL("All Boards", Icons.Default.Dashboard, 1),
-    RECENTS("Recents", Icons.Default.Schedule, 1),
-    SHARED("Shared", Icons.Default.People, 0),
-    FAVORITES("Favorites", Icons.Default.Favorite, 0),
-    DELETED("Recently Deleted", Icons.Default.Delete, 1)
+@Composable
+fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
+    var currentScreen by remember { mutableStateOf<AppScreen>(AppScreen.Dashboard) }
+
+    val savedBoardsJson = prefs.getString("boards_key", null)
+    val initialBoards: List<FreeformBoard> = if (!savedBoardsJson.isNullOrEmpty()) {
+        val type = object : com.google.gson.reflect.TypeToken<List<FreeformBoard>>() {}.type
+        gson.fromJson(savedBoardsJson, type) ?: emptyList()
+    } else {
+        emptyList()
+    }
+    val boards = remember { mutableStateListOf<FreeformBoard>().apply { addAll(initialBoards) } }
+
+    // Save/Load StorableStroke DTOs instead of raw CanvasStrokes
+    val savedStrokesJson = prefs.getString("strokes_map_key", null)
+    val initialStrokesMap: Map<String, List<StorableStroke>> = if (!savedStrokesJson.isNullOrEmpty()) {
+        val type = object : com.google.gson.reflect.TypeToken<Map<String, List<StorableStroke>>>() {}.type
+        gson.fromJson(savedStrokesJson, type) ?: emptyMap()
+    } else {
+        emptyMap()
+    }
+
+    val boardStrokesMap = remember {
+        val map = mutableStateMapOf<String, MutableList<CanvasStroke>>()
+        initialStrokesMap.forEach { (boardId, storableStrokes) ->
+            map[boardId] = mutableStateListOf<CanvasStroke>().apply {
+                addAll(storableStrokes.map { it.toCanvasStroke() })
+            }
+        }
+        map
+    }
+
+    fun saveData() {
+        val editor = prefs.edit()
+        editor.putString("boards_key", gson.toJson(boards.toList()))
+
+        // Map UI strokes to primitive DTOs before saving
+        val storableMap = boardStrokesMap.mapValues { entry ->
+            entry.value.map { it.toStorable() }
+        }
+        editor.putString("strokes_map_key", gson.toJson(storableMap))
+        editor.apply()
+    }
+
+    when (val screen = currentScreen) {
+        is AppScreen.Dashboard -> {
+            FreeformMainDashboardScreen(
+                boards = boards,
+                onBoardClick = { boardId, title ->
+                    currentScreen = AppScreen.Studio(boardId, title)
+                },
+                onCreateBoard = { newBoard ->
+                    boards.add(newBoard)
+                    boardStrokesMap[newBoard.id] = mutableStateListOf()
+                    saveData()
+                    currentScreen = AppScreen.Studio(newBoard.id, newBoard.title)
+                },
+                onDeleteBoard = { board ->
+                    boards.remove(board)
+                    boardStrokesMap.remove(board.id)
+                    saveData()
+                }
+            )
+        }
+        is AppScreen.Studio -> {
+            val activeStrokes = remember(screen.boardId) {
+                boardStrokesMap.getOrPut(screen.boardId) { mutableStateListOf() }
+            }
+
+            FreeformStudioCanvasScreen(
+                boardTitle = screen.boardTitle,
+                strokes = activeStrokes,
+                onStrokeAdded = { saveData() },
+                onBack = {
+                    saveData()
+                    currentScreen = AppScreen.Dashboard
+                }
+            )
+        }
+    }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+
+// --- 1. DASHBOARD SCREEN ---
+
+enum class FreeformCategory(val label: String, val icon: ImageVector) {
+    ALL("All Boards", Icons.Default.Dashboard),
+    RECENTS("Recents", Icons.Default.Schedule),
+    SHARED("Shared", Icons.Default.People),
+    FAVORITES("Favorites", Icons.Default.Favorite),
+    DELETED("Recently Deleted", Icons.Default.Delete)
+}
+
 @Composable
-fun FreeformMainDashboardScreen(onBoardClick: (String, String) -> Unit) {
+fun FreeformMainDashboardScreen(
+    boards: List<FreeformBoard>,
+    onBoardClick: (String, String) -> Unit,
+    onCreateBoard: (FreeformBoard) -> Unit,
+    onDeleteBoard: (FreeformBoard) -> Unit
+) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var selectedCategory by remember { mutableStateOf(FreeformCategory.ALL) }
     var searchQuery by remember { mutableStateOf("") }
-
-    val boards = remember {
-        mutableStateListOf(
-            FreeformBoard(id = "1", title = "Untitled", subtitle = "Today, 5:22 PM")
-        )
-    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -138,6 +208,7 @@ fun FreeformMainDashboardScreen(onBoardClick: (String, String) -> Unit) {
                     )
 
                     FreeformCategory.entries.forEach { category ->
+                        val count = if (category == FreeformCategory.ALL) boards.size else 0
                         NavigationDrawerItem(
                             icon = { Icon(category.icon, contentDescription = null) },
                             label = {
@@ -147,7 +218,7 @@ fun FreeformMainDashboardScreen(onBoardClick: (String, String) -> Unit) {
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(category.label)
-                                    Text(category.count.toString(), style = MaterialTheme.typography.bodyMedium)
+                                    Text(count.toString(), style = MaterialTheme.typography.bodyMedium)
                                 }
                             },
                             selected = selectedCategory == category,
@@ -188,7 +259,13 @@ fun FreeformMainDashboardScreen(onBoardClick: (String, String) -> Unit) {
                 FloatingActionButton(
                     onClick = {
                         val newId = System.currentTimeMillis().toString()
-                        boards.add(FreeformBoard(id = newId, title = "Untitled Board", subtitle = "Just now"))
+                        onCreateBoard(
+                            FreeformBoard(
+                                id = newId,
+                                title = "Untitled Board",
+                                subtitle = "Just now"
+                            )
+                        )
                     },
                     shape = RoundedCornerShape(20.dp)
                 ) {
@@ -203,14 +280,31 @@ fun FreeformMainDashboardScreen(onBoardClick: (String, String) -> Unit) {
                 Text(text = selectedCategory.label, style = MaterialTheme.typography.headlineMedium)
                 Spacer(modifier = Modifier.height(20.dp))
 
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 160.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(boards) { board ->
-                        DashboardBoardCard(board = board, onClick = { onBoardClick(board.id, board.title) })
+                if (boards.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "No boards yet. Tap '+' to create one.",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 160.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(boards) { board ->
+                            DashboardBoardCard(
+                                board = board,
+                                onClick = { onBoardClick(board.id, board.title) },
+                                onDelete = { onDeleteBoard(board) }
+                            )
+                        }
                     }
                 }
             }
@@ -219,23 +313,54 @@ fun FreeformMainDashboardScreen(onBoardClick: (String, String) -> Unit) {
 }
 
 @Composable
-fun DashboardBoardCard(board: FreeformBoard, onClick: () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth().height(220.dp).clickable(onClick = onClick),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
-    ) {
-        Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
-            Box(
-                modifier = Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surface),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(text = "hello world!\nXDA", color = MaterialTheme.colorScheme.onSurfaceVariant)
+fun DashboardBoardCard(board: FreeformBoard, onClick: () -> Unit, onDelete: () -> Unit) {
+    var showMenu by remember { mutableStateOf(false) }
+
+    Box {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp)
+                .clickable(onClick = onClick),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+        ) {
+            Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surface),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(text = board.title, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(text = board.title, style = MaterialTheme.typography.titleSmall)
+                        Text(text = board.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = { showMenu = true }, modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Options", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
-            Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-                Text(text = board.title, style = MaterialTheme.typography.titleSmall)
-                Text(text = board.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+        }
+
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false },
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            DropdownMenuItem(
+                text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                onClick = {
+                    showMenu = false
+                    onDelete()
+                }
+            )
         }
     }
 }
@@ -245,11 +370,13 @@ fun DashboardBoardCard(board: FreeformBoard, onClick: () -> Unit) {
 
 enum class StudioTool { PAN, PEN, NOTE, SHAPE }
 
-data class CanvasStrokePoint(val position: Offset, val pressure: Float)
-data class CanvasStroke(val id: String = UUID.randomUUID().toString(), val points: List<CanvasStrokePoint>, val color: Color, val baseWidth: Float)
-
 @Composable
-fun FreeformStudioCanvasScreen(boardTitle: String, onBack: () -> Unit) {
+fun FreeformStudioCanvasScreen(
+    boardTitle: String,
+    strokes: MutableList<CanvasStroke>,
+    onStrokeAdded: () -> Unit,
+    onBack: () -> Unit
+) {
     var selectedTool by remember { mutableStateOf(StudioTool.PEN) }
     val activeColor by remember { mutableStateOf(Color(0xFFFFFFFF)) }
     val baseStrokeWidth by remember { mutableFloatStateOf(12f) }
@@ -259,7 +386,9 @@ fun FreeformStudioCanvasScreen(boardTitle: String, onBack: () -> Unit) {
         FreeformInteractiveCanvas(
             isPenActive = (selectedTool == StudioTool.PEN),
             activeColor = activeColor,
-            baseStrokeWidth = baseStrokeWidth
+            baseStrokeWidth = baseStrokeWidth,
+            strokes = strokes,
+            onStrokeAdded = onStrokeAdded
         )
 
         Surface(
@@ -313,11 +442,16 @@ fun StudioToolButton(icon: ImageVector, label: String, isSelected: Boolean, onCl
 }
 
 @Composable
-fun FreeformInteractiveCanvas(isPenActive: Boolean, activeColor: Color, baseStrokeWidth: Float) {
+fun FreeformInteractiveCanvas(
+    isPenActive: Boolean,
+    activeColor: Color,
+    baseStrokeWidth: Float,
+    strokes: MutableList<CanvasStroke>,
+    onStrokeAdded: () -> Unit
+) {
     var scale by remember { mutableFloatStateOf(1f) }
     var canvasOffset by remember { mutableStateOf(Offset.Zero) }
 
-    val strokes = remember { mutableStateListOf<CanvasStroke>() }
     val currentPoints = remember { mutableStateListOf<CanvasStrokePoint>() }
 
     Box(
@@ -349,6 +483,7 @@ fun FreeformInteractiveCanvas(isPenActive: Boolean, activeColor: Color, baseStro
                         if (currentPoints.isNotEmpty()) {
                             strokes.add(CanvasStroke(points = currentPoints.toList(), color = activeColor, baseWidth = baseStrokeWidth))
                             currentPoints.clear()
+                            onStrokeAdded()
                         }
                     }
                 )
@@ -442,7 +577,7 @@ fun DrawScope.drawSmoothPressureStroke(stroke: CanvasStroke) {
 
     for (i in 1 until points.size) {
         val current = points[i]
-        val nextMid = if (i == points.size - 1) current.position else lerp(points[i - 1].position, current.position, 0.5f)
+        val nextMid = if (i == points.size - 1) current.position else androidx.compose.ui.geometry.lerp(points[i - 1].position, current.position, 0.5f)
         val nextPressure = if (i == points.size - 1) current.pressure else (points[i - 1].pressure + current.pressure) / 2f
 
         drawQuadraticPressureSegment(prevMid, points[i - 1].position, nextMid, prevPressure, nextPressure, stroke.baseWidth, stroke.color)
