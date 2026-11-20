@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -48,6 +49,7 @@ import kotlin.math.hypot
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
 
         val prefs = getSharedPreferences("inkdrift_prefs", Context.MODE_PRIVATE)
         val gson = Gson()
@@ -392,7 +394,7 @@ fun FreeformStudioCanvasScreen(
         )
 
         Surface(
-            modifier = Modifier.align(Alignment.TopCenter).padding(16.dp),
+            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(16.dp),
             shape = RoundedCornerShape(24.dp),
             tonalElevation = 4.dp,
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
@@ -410,7 +412,7 @@ fun FreeformStudioCanvasScreen(
             }
         }
 
-        Box(modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 32.dp)) {
+        Box(modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 32.dp)) {
             Surface(
                 modifier = Modifier.shadow(8.dp, RoundedCornerShape(32.dp)),
                 shape = RoundedCornerShape(32.dp),
