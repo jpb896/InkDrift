@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.StickyNote2
@@ -24,9 +25,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -87,6 +90,16 @@ data class FreeformBoard(
     val subtitle: String
 )
 
+data class StickyNote(
+    val id: String = UUID.randomUUID().toString(),
+    var text: String = "Sticky note",
+    var x: Float = 0f,
+    var y: Float = 0f,
+    var width: Float = 220f,
+    var height: Float = 220f,
+    val colorValue: Long = 0xFFFFEE58L // Apple Freeform style yellow
+)
+
 @Composable
 fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
     var currentScreen by remember { mutableStateOf<AppScreen>(AppScreen.Dashboard) }
@@ -119,6 +132,25 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
         map
     }
 
+    // Save/Load Sticky Notes
+    val savedNotesJson = prefs.getString("notes_map_key", null)
+    val initialNotesMap: Map<String, List<StickyNote>> = if (!savedNotesJson.isNullOrEmpty()) {
+        val type = object : com.google.gson.reflect.TypeToken<Map<String, List<StickyNote>>>() {}.type
+        gson.fromJson(savedNotesJson, type) ?: emptyMap()
+    } else {
+        emptyMap()
+    }
+
+    val boardNotesMap = remember {
+        val map = mutableStateMapOf<String, MutableList<StickyNote>>()
+        initialNotesMap.forEach { (boardId, notes) ->
+            map[boardId] = mutableStateListOf<StickyNote>().apply {
+                addAll(notes)
+            }
+        }
+        map
+    }
+
     fun saveData() {
         val editor = prefs.edit()
         editor.putString("boards_key", gson.toJson(boards.toList()))
@@ -128,6 +160,11 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
             entry.value.map { it.toStorable() }
         }
         editor.putString("strokes_map_key", gson.toJson(storableMap))
+
+        val notesMap = boardNotesMap.mapValues { entry ->
+            entry.value.toList()
+        }
+        editor.putString("notes_map_key", gson.toJson(notesMap))
         editor.apply()
     }
 
@@ -141,12 +178,14 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
                 onCreateBoard = { newBoard ->
                     boards.add(newBoard)
                     boardStrokesMap[newBoard.id] = mutableStateListOf()
+                    boardNotesMap[newBoard.id] = mutableStateListOf()
                     saveData()
                     currentScreen = AppScreen.Studio(newBoard.id, newBoard.title)
                 },
                 onDeleteBoard = { board ->
                     boards.remove(board)
                     boardStrokesMap.remove(board.id)
+                    boardNotesMap.remove(board.id)
                     saveData()
                 }
             )
@@ -155,11 +194,15 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
             val activeStrokes = remember(screen.boardId) {
                 boardStrokesMap.getOrPut(screen.boardId) { mutableStateListOf() }
             }
+            val activeNotes = remember(screen.boardId) {
+                boardNotesMap.getOrPut(screen.boardId) { mutableStateListOf() }
+            }
 
             FreeformStudioCanvasScreen(
                 boardTitle = screen.boardTitle,
                 strokes = activeStrokes,
-                onStrokeAdded = { saveData() },
+                notes = activeNotes,
+                onDataChanged = { saveData() },
                 onBack = {
                     saveData()
                     currentScreen = AppScreen.Dashboard
@@ -376,21 +419,36 @@ enum class StudioTool { PAN, PEN, NOTE, SHAPE }
 fun FreeformStudioCanvasScreen(
     boardTitle: String,
     strokes: MutableList<CanvasStroke>,
-    onStrokeAdded: () -> Unit,
+    notes: MutableList<StickyNote>,
+    onDataChanged: () -> Unit,
     onBack: () -> Unit
 ) {
     var selectedTool by remember { mutableStateOf(StudioTool.PEN) }
     val activeColor by remember { mutableStateOf(Color(0xFFFFFFFF)) }
     val baseStrokeWidth by remember { mutableFloatStateOf(12f) }
 
+    var scale by remember { mutableFloatStateOf(1f) }
+    var canvasOffset by remember { mutableStateOf(Offset.Zero) }
+
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF181818))) {
 
         FreeformInteractiveCanvas(
-            isPenActive = (selectedTool == StudioTool.PEN),
+            selectedTool = selectedTool,
             activeColor = activeColor,
             baseStrokeWidth = baseStrokeWidth,
             strokes = strokes,
-            onStrokeAdded = onStrokeAdded
+            notes = notes,
+            scale = scale,
+            canvasOffset = canvasOffset,
+            onTransform = { pan, zoom, centroid ->
+                val oldScale = scale
+                val newScale = (scale * zoom).coerceIn(0.15f, 6.0f)
+                val scaleFactor = newScale / oldScale
+                canvasOffset = (canvasOffset - centroid) * scaleFactor + centroid + pan
+                scale = newScale
+            },
+            onStrokeAdded = onDataChanged,
+            onNoteChanged = onDataChanged
         )
 
         Surface(
@@ -425,7 +483,19 @@ fun FreeformStudioCanvasScreen(
                 ) {
                     StudioToolButton(Icons.Default.PanTool, "Pan", selectedTool == StudioTool.PAN) { selectedTool = StudioTool.PAN }
                     StudioToolButton(Icons.Default.Edit, "Pen", selectedTool == StudioTool.PEN) { selectedTool = StudioTool.PEN }
-                    StudioToolButton(Icons.AutoMirrored.Filled.StickyNote2, "Note", selectedTool == StudioTool.NOTE) { selectedTool = StudioTool.NOTE }
+                    StudioToolButton(Icons.AutoMirrored.Filled.StickyNote2, "Note", selectedTool == StudioTool.NOTE) {
+                        selectedTool = StudioTool.NOTE
+                        val worldCenterX = -canvasOffset.x / scale + 400f
+                        val worldCenterY = -canvasOffset.y / scale + 400f
+                        notes.add(
+                            StickyNote(
+                                x = worldCenterX,
+                                y = worldCenterY,
+                                text = "Sticky note"
+                            )
+                        )
+                        onDataChanged()
+                    }
                     StudioToolButton(Icons.Default.Category, "Shape", selectedTool == StudioTool.SHAPE) { selectedTool = StudioTool.SHAPE }
                 }
             }
@@ -445,50 +515,63 @@ fun StudioToolButton(icon: ImageVector, label: String, isSelected: Boolean, onCl
 
 @Composable
 fun FreeformInteractiveCanvas(
-    isPenActive: Boolean,
+    selectedTool: StudioTool,
     activeColor: Color,
     baseStrokeWidth: Float,
     strokes: MutableList<CanvasStroke>,
-    onStrokeAdded: () -> Unit
+    notes: MutableList<StickyNote>,
+    scale: Float,
+    canvasOffset: Offset,
+    onTransform: (pan: Offset, zoom: Float, centroid: Offset) -> Unit,
+    onStrokeAdded: () -> Unit,
+    onNoteChanged: () -> Unit
 ) {
-    var scale by remember { mutableFloatStateOf(1f) }
-    var canvasOffset by remember { mutableStateOf(Offset.Zero) }
-
     val currentPoints = remember { mutableStateListOf<CanvasStrokePoint>() }
+    val isPenActive = (selectedTool == StudioTool.PEN)
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(isPenActive, activeColor, baseStrokeWidth) {
-                detectCanvasGestures(
-                    isPenActive = isPenActive,
-                    getCanvasOffset = { canvasOffset },
-                    getScale = { scale },
-                    onTransform = { pan, zoom, centroid ->
-                        val oldScale = scale
-                        val newScale = (scale * zoom).coerceIn(0.15f, 6.0f)
-                        val scaleFactor = newScale / oldScale
-                        canvasOffset = (canvasOffset - centroid) * scaleFactor + centroid + pan
-                        scale = newScale
-                    },
-                    onStrokeStart = { point ->
-                        currentPoints.clear()
-                        currentPoints.add(point)
-                    },
-                    onStrokeMove = { point ->
-                        val last = currentPoints.lastOrNull()
-                        if (last == null || (point.position - last.position).getDistance() > 1f) {
-                            currentPoints.add(point)
+            .pointerInput(selectedTool, activeColor, baseStrokeWidth) {
+                if (selectedTool == StudioTool.NOTE) {
+                    detectTapGestures(
+                        onTap = { tapOffset ->
+                            val worldPos = convertScreenToWorld(tapOffset, canvasOffset, scale)
+                            notes.add(
+                                StickyNote(
+                                    x = worldPos.x - 110f,
+                                    y = worldPos.y - 110f,
+                                    text = "Sticky note"
+                                )
+                            )
+                            onNoteChanged()
                         }
-                    },
-                    onStrokeEnd = {
-                        if (currentPoints.isNotEmpty()) {
-                            strokes.add(CanvasStroke(points = currentPoints.toList(), color = activeColor, baseWidth = baseStrokeWidth))
+                    )
+                } else {
+                    detectCanvasGestures(
+                        isPenActive = isPenActive,
+                        getCanvasOffset = { canvasOffset },
+                        getScale = { scale },
+                        onTransform = onTransform,
+                        onStrokeStart = { point ->
                             currentPoints.clear()
-                            onStrokeAdded()
+                            currentPoints.add(point)
+                        },
+                        onStrokeMove = { point ->
+                            val last = currentPoints.lastOrNull()
+                            if (last == null || (point.position - last.position).getDistance() > 1f) {
+                                currentPoints.add(point)
+                            }
+                        },
+                        onStrokeEnd = {
+                            if (currentPoints.isNotEmpty()) {
+                                strokes.add(CanvasStroke(points = currentPoints.toList(), color = activeColor, baseWidth = baseStrokeWidth))
+                                currentPoints.clear()
+                                onStrokeAdded()
+                            }
                         }
-                    }
-                )
+                    )
+                }
             }
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
@@ -500,6 +583,135 @@ fun FreeformInteractiveCanvas(
                 if (currentPoints.isNotEmpty()) {
                     drawSmoothPressureStroke(CanvasStroke(points = currentPoints, color = activeColor, baseWidth = baseStrokeWidth))
                 }
+            }
+        }
+
+        notes.forEach { note ->
+            StickyNoteItem(
+                note = note,
+                scale = scale,
+                canvasOffset = canvasOffset,
+                onNoteChanged = onNoteChanged,
+                onDelete = {
+                    notes.remove(note)
+                    onNoteChanged()
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun StickyNoteItem(
+    note: StickyNote,
+    scale: Float,
+    canvasOffset: Offset,
+    onNoteChanged: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var text by remember(note.text) { mutableStateOf(note.text) }
+    var posX by remember { mutableFloatStateOf(note.x) }
+    var posY by remember { mutableFloatStateOf(note.y) }
+    var isSelected by remember { mutableStateOf(false) }
+
+    val screenX = canvasOffset.x + posX * scale
+    val screenY = canvasOffset.y + posY * scale
+
+    Box(
+        modifier = Modifier
+            .graphicsLayer {
+                translationX = screenX
+                translationY = screenY
+                scaleX = scale
+                scaleY = scale
+                transformOrigin = TransformOrigin(0f, 0f)
+            }
+            .size(width = note.width.dp, height = note.height.dp)
+            .shadow(8.dp, RoundedCornerShape(4.dp))
+            .background(Color(note.colorValue), RoundedCornerShape(4.dp))
+            .clickable { isSelected = !isSelected }
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    posX += dragAmount.x / scale
+                    posY += dragAmount.y / scale
+                    note.x = posX
+                    note.y = posY
+                    onNoteChanged()
+                }
+            }
+            .padding(12.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                if (isSelected) {
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Delete Note",
+                            tint = Color.DarkGray,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+
+            BasicTextField(
+                value = text,
+                onValueChange = {
+                    text = it
+                    note.text = it
+                    onNoteChanged()
+                },
+                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                    color = Color(0xFF212121)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+        }
+
+        // 4 Blue corner dots (selection handles like Apple Freeform)
+        if (isSelected) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .align(Alignment.TopStart)
+                        .offset((-4).dp, (-4).dp)
+                        .background(Color(0xFF2196F3), CircleShape)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .align(Alignment.TopEnd)
+                        .offset(4.dp, (-4).dp)
+                        .background(Color(0xFF2196F3), CircleShape)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .align(Alignment.BottomStart)
+                        .offset((-4).dp, 4.dp)
+                        .background(Color(0xFF2196F3), CircleShape)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .align(Alignment.BottomEnd)
+                        .offset(4.dp, 4.dp)
+                        .background(Color(0xFF2196F3), CircleShape)
+                )
             }
         }
     }
