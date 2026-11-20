@@ -182,6 +182,13 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
                     saveData()
                     currentScreen = AppScreen.Studio(newBoard.id, newBoard.title)
                 },
+                onRenameBoard = { board, newTitle ->
+                    val index = boards.indexOf(board)
+                    if (index != -1) {
+                        boards[index] = board.copy(title = newTitle)
+                        saveData()
+                    }
+                },
                 onDeleteBoard = { board ->
                     boards.remove(board)
                     boardStrokesMap.remove(board.id)
@@ -228,12 +235,15 @@ fun FreeformMainDashboardScreen(
     boards: List<FreeformBoard>,
     onBoardClick: (String, String) -> Unit,
     onCreateBoard: (FreeformBoard) -> Unit,
+    onRenameBoard: (FreeformBoard, String) -> Unit,
     onDeleteBoard: (FreeformBoard) -> Unit
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var selectedCategory by remember { mutableStateOf(FreeformCategory.ALL) }
     var searchQuery by remember { mutableStateOf("") }
+    var showCreateDialog by remember { mutableStateOf(false) }
+    var newBoardTitleInput by remember { mutableStateOf("") }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -303,14 +313,8 @@ fun FreeformMainDashboardScreen(
             floatingActionButton = {
                 FloatingActionButton(
                     onClick = {
-                        val newId = System.currentTimeMillis().toString()
-                        onCreateBoard(
-                            FreeformBoard(
-                                id = newId,
-                                title = "Untitled Board",
-                                subtitle = "Just now"
-                            )
-                        )
+                        newBoardTitleInput = ""
+                        showCreateDialog = true
                     },
                     shape = RoundedCornerShape(20.dp)
                 ) {
@@ -347,6 +351,7 @@ fun FreeformMainDashboardScreen(
                             DashboardBoardCard(
                                 board = board,
                                 onClick = { onBoardClick(board.id, board.title) },
+                                onRename = { newTitle -> onRenameBoard(board, newTitle) },
                                 onDelete = { onDeleteBoard(board) }
                             )
                         }
@@ -355,11 +360,59 @@ fun FreeformMainDashboardScreen(
             }
         }
     }
+
+    if (showCreateDialog) {
+        AlertDialog(
+            onDismissRequest = { showCreateDialog = false },
+            title = { Text("Create New Board") },
+            text = {
+                OutlinedTextField(
+                    value = newBoardTitleInput,
+                    onValueChange = { newBoardTitleInput = it },
+                    singleLine = true,
+                    label = { Text("Board Title") },
+                    placeholder = { Text("e.g. Design Ideas") },
+                    shape = RoundedCornerShape(12.dp)
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showCreateDialog = false
+                        val title = newBoardTitleInput.ifBlank { "Untitled Board" }
+                        val newId = System.currentTimeMillis().toString()
+                        onCreateBoard(
+                            FreeformBoard(
+                                id = newId,
+                                title = title,
+                                subtitle = "Just now"
+                            )
+                        )
+                    }
+                ) {
+                    Text("Create")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+            shape = RoundedCornerShape(24.dp)
+        )
+    }
 }
 
 @Composable
-fun DashboardBoardCard(board: FreeformBoard, onClick: () -> Unit, onDelete: () -> Unit) {
+fun DashboardBoardCard(
+    board: FreeformBoard,
+    onClick: () -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: () -> Unit
+) {
     var showMenu by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameText by remember { mutableStateOf(board.title) }
 
     Box {
         Card(
@@ -399,12 +452,55 @@ fun DashboardBoardCard(board: FreeformBoard, onClick: () -> Unit, onDelete: () -
             shape = RoundedCornerShape(16.dp)
         ) {
             DropdownMenuItem(
+                text = { Text("Rename") },
+                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                onClick = {
+                    showMenu = false
+                    renameText = board.title
+                    showRenameDialog = true
+                }
+            )
+            DropdownMenuItem(
                 text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
                 leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
                 onClick = {
                     showMenu = false
                     onDelete()
                 }
+            )
+        }
+
+        if (showRenameDialog) {
+            AlertDialog(
+                onDismissRequest = { showRenameDialog = false },
+                title = { Text("Rename Board") },
+                text = {
+                    OutlinedTextField(
+                        value = renameText,
+                        onValueChange = { renameText = it },
+                        singleLine = true,
+                        label = { Text("Board Title") },
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showRenameDialog = false
+                            if (renameText.isNotBlank()) {
+                                onRename(renameText.trim())
+                            }
+                        }
+                    ) {
+                        Text("Save")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showRenameDialog = false }) {
+                        Text("Cancel")
+                    }
+                },
+                shape = RoundedCornerShape(24.dp)
             )
         }
     }
