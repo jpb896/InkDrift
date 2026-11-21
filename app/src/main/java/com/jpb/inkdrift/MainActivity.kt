@@ -35,6 +35,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathOperation
@@ -223,6 +224,9 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
         is AppScreen.Dashboard -> {
             FreeformMainDashboardScreen(
                 boards = boards,
+                boardStrokesMap = boardStrokesMap,
+                boardNotesMap = boardNotesMap,
+                boardShapesMap = boardShapesMap,
                 onBoardClick = { boardId, title ->
                     currentScreen = AppScreen.Studio(boardId, title)
                 },
@@ -286,6 +290,9 @@ enum class FreeformCategory(val label: String, val icon: ImageVector) {
 @Composable
 fun FreeformMainDashboardScreen(
     boards: List<FreeformBoard>,
+    boardStrokesMap: Map<String, List<CanvasStroke>>,
+    boardNotesMap: Map<String, List<StickyNote>>,
+    boardShapesMap: Map<String, List<BoardShape>>,
     onBoardClick: (String, String) -> Unit,
     onCreateBoard: (FreeformBoard) -> Unit,
     onRenameBoard: (FreeformBoard, String) -> Unit,
@@ -430,6 +437,9 @@ fun FreeformMainDashboardScreen(
                         items(filteredBoards, key = { it.id }) { board ->
                             DashboardBoardCard(
                                 board = board,
+                                strokes = boardStrokesMap[board.id] ?: emptyList(),
+                                notes = boardNotesMap[board.id] ?: emptyList(),
+                                shapes = boardShapesMap[board.id] ?: emptyList(),
                                 onClick = { onBoardClick(board.id, board.title) },
                                 onRename = { newTitle -> onRenameBoard(board, newTitle) },
                                 onDelete = { onDeleteBoard(board) }
@@ -486,6 +496,9 @@ fun FreeformMainDashboardScreen(
 @Composable
 fun DashboardBoardCard(
     board: FreeformBoard,
+    strokes: List<CanvasStroke>,
+    notes: List<StickyNote>,
+    shapes: List<BoardShape>,
     onClick: () -> Unit,
     onRename: (String) -> Unit,
     onDelete: () -> Unit
@@ -496,19 +509,24 @@ fun DashboardBoardCard(
 
     Box {
         Card(
+            onClick = onClick,
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
             modifier = Modifier
                 .fillMaxWidth()
                 .height(220.dp)
-                .clickable(onClick = onClick),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
         ) {
             Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
                 Box(
-                    modifier = Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surface),
-                    contentAlignment = Alignment.Center
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                        .background(Color(0xFF1E1E1E))
                 ) {
-                    Text(text = board.title, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawBoardThumbnail(strokes, notes, shapes)
+                    }
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -581,6 +599,82 @@ fun DashboardBoardCard(
                     }
                 },
                 shape = RoundedCornerShape(24.dp)
+            )
+        }
+    }
+}
+
+fun DrawScope.drawBoardThumbnail(
+    strokes: List<CanvasStroke>,
+    notes: List<StickyNote>,
+    shapes: List<BoardShape>
+) {
+    if (strokes.isEmpty() && notes.isEmpty() && shapes.isEmpty()) {
+        drawRect(Color(0xFF1A1A1A))
+        return
+    }
+
+    var minX = Float.MAX_VALUE
+    var minY = Float.MAX_VALUE
+    var maxX = -Float.MAX_VALUE
+    var maxY = -Float.MAX_VALUE
+
+    shapes.forEach { shape ->
+        minX = minOf(minX, shape.x)
+        minY = minOf(minY, shape.y)
+        maxX = maxOf(maxX, shape.x + shape.width)
+        maxY = maxOf(maxY, shape.y + shape.height)
+    }
+
+    notes.forEach { note ->
+        minX = minOf(minX, note.x)
+        minY = minOf(minY, note.y)
+        maxX = maxOf(maxX, note.x + note.width)
+        maxY = maxOf(maxY, note.y + note.height)
+    }
+
+    strokes.forEach { stroke ->
+        stroke.points.forEach { pt ->
+            minX = minOf(minX, pt.position.x)
+            minY = minOf(minY, pt.position.y)
+            maxX = maxOf(maxX, pt.position.x)
+            maxY = maxOf(maxY, pt.position.y)
+        }
+    }
+
+    if (minX >= maxX || minY >= maxY) {
+        minX = 0f
+        minY = 0f
+        maxX = 800f
+        maxY = 600f
+    }
+
+    val contentWidth = (maxX - minX).coerceAtLeast(100f)
+    val contentHeight = (maxY - minY).coerceAtLeast(100f)
+    val padding = 30f
+
+    val scaleX = size.width / (contentWidth + padding * 2)
+    val scaleY = size.height / (contentHeight + padding * 2)
+    val thumbnailScale = minOf(scaleX, scaleY).coerceAtMost(1.0f)
+
+    val contentCenterX = minX + contentWidth / 2f
+    val contentCenterY = minY + contentHeight / 2f
+
+    val thumbnailOffsetX = size.width / 2f - contentCenterX * thumbnailScale
+    val thumbnailOffsetY = size.height / 2f - contentCenterY * thumbnailScale
+
+    withTransform({
+        translate(left = thumbnailOffsetX, top = thumbnailOffsetY)
+        scale(scaleX = thumbnailScale, scaleY = thumbnailScale, pivot = Offset.Zero)
+    }) {
+        shapes.forEach { shape -> drawBoardShape(shape) }
+        strokes.forEach { stroke -> drawSmoothPressureStroke(stroke) }
+        notes.forEach { note ->
+            drawRoundRect(
+                color = Color(note.colorValue),
+                topLeft = Offset(note.x, note.y),
+                size = Size(note.width, note.height),
+                cornerRadius = CornerRadius(4f, 4f)
             )
         }
     }
