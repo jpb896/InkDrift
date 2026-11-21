@@ -1617,7 +1617,6 @@ private fun ShapeType.buildPath(w: Float, h: Float): Path = Path().apply {
 
 @Composable
 fun ShapePickerPopup(onPick: (ShapeType) -> Unit, modifier: Modifier = Modifier) {
-    val accent = Color(0xFF5BC0F8)
     var category by remember { mutableStateOf(ShapeCategory.BASIC) }
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
@@ -1629,75 +1628,130 @@ fun ShapePickerPopup(onPick: (ShapeType) -> Unit, modifier: Modifier = Modifier)
     }
 
     Surface(
-        modifier = modifier.width(300.dp).shadow(12.dp, RoundedCornerShape(20.dp)),
-        shape = RoundedCornerShape(20.dp),
-        color = Color(0xFF3A3A3C)
+        modifier = modifier
+            .width(320.dp)
+            .shadow(16.dp, RoundedCornerShape(28.dp)),
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 6.dp
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = {
-                        searching = !searching
-                        if (!searching) query = ""
-                    },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(Icons.Default.Search, contentDescription = "Search shapes", tint = accent)
-                }
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Header Row / Search Bar
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
                 if (searching) {
-                    BasicTextField(
+                    OutlinedTextField(
                         value = query,
                         onValueChange = { query = it },
+                        placeholder = { Text("Search shapes...", style = MaterialTheme.typography.bodyMedium) },
                         singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color.White),
-                        cursorBrush = SolidColor(accent),
-                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
-                        decorationBox = { inner ->
-                            Box {
-                                if (query.isEmpty()) {
-                                    Text("Search shapes", color = Color(0xFF9E9E9E), style = MaterialTheme.typography.bodyMedium)
-                                }
-                                inner()
+                        shape = CircleShape,
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Search,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        trailingIcon = {
+                            IconButton(onClick = {
+                                query = ""
+                                searching = false
+                            }) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Clear search",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
-                        }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = Color.Transparent
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
                     )
                 } else {
-                    Row(
-                        modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    Text(
+                        text = "Shapes",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(start = 4.dp)
+                    )
+                    IconButton(
+                        onClick = { searching = true },
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                            .size(36.dp)
                     ) {
-                        ShapeCategory.entries.forEach { cat ->
-                            val selected = cat == category
-                            Text(
-                                text = cat.label,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (selected) Color.White else accent,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (selected) accent else Color.Transparent)
-                                    .clickable { category = cat }
-                                    .padding(horizontal = 10.dp, vertical = 4.dp)
-                            )
-                        }
+                        Icon(
+                            Icons.Default.Search,
+                            contentDescription = "Search shapes",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            // Categories Filter Chips
+            if (!searching) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ShapeCategory.entries.forEach { cat ->
+                        val selected = cat == category
+                        FilterChip(
+                            selected = selected,
+                            onClick = { category = cat },
+                            label = { Text(cat.label) },
+                            shape = CircleShape,
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                                labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            border = null
+                        )
+                    }
+                }
+            }
 
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Shapes Grid
             if (items.isEmpty()) {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(120.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(240.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("No shapes found", color = Color(0xFF9E9E9E), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "No shapes found",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                 }
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(3),
-                    modifier = Modifier.height(280.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    modifier = Modifier.height(260.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(items) { type ->
                         ShapePickerCell(type) { onPick(type) }
@@ -1710,27 +1764,36 @@ fun ShapePickerPopup(onPick: (ShapeType) -> Unit, modifier: Modifier = Modifier)
 
 @Composable
 private fun ShapePickerCell(type: ShapeType, onClick: () -> Unit) {
-    Box(
+    val primaryColor = MaterialTheme.colorScheme.primary
+
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier
             .aspectRatio(1f)
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
             .semantics { contentDescription = type.label }
-            .padding(14.dp),
-        contentAlignment = Alignment.Center
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) { drawShapePreview(type) }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(14.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawShapePreview(type, primaryColor)
+            }
+        }
     }
 }
 
-private fun DrawScope.drawShapePreview(type: ShapeType) {
-    val color = Color(DEFAULT_SHAPE_COLOR)
+private fun DrawScope.drawShapePreview(type: ShapeType, previewColor: Color = Color(DEFAULT_SHAPE_COLOR)) {
     if (type.isLine) {
         drawLineShape(
-            color,
+            previewColor,
             Offset(size.width * 0.08f, size.height * 0.92f),
             Offset(size.width * 0.92f, size.height * 0.08f),
-            2.dp.toPx(),
+            2.5.dp.toPx(),
             type == ShapeType.ARROW_LINE,
             14.dp.toPx()
         )
@@ -1746,7 +1809,7 @@ private fun DrawScope.drawShapePreview(type: ShapeType) {
         w = size.height * type.aspect
     }
     translate(left = (size.width - w) / 2f, top = (size.height - h) / 2f) {
-        drawPath(type.buildPath(w, h), color)
+        drawPath(type.buildPath(w, h), previewColor)
     }
 }
 
