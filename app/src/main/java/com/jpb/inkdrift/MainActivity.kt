@@ -52,7 +52,16 @@ import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -61,6 +70,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.jpb.inkdrift.util.CanvasStroke
@@ -198,6 +208,20 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
         map
     }
 
+    // Save/Load Text boxes
+    val boardTextsMap = remember {
+        val map = mutableStateMapOf<String, MutableList<BoardText>>()
+        val json = prefs.getString("texts_map_key", null)
+        if (!json.isNullOrEmpty()) {
+            val type = object : TypeToken<Map<String, List<BoardText>>>() {}.type
+            val saved: Map<String, List<BoardText>>? = gson.fromJson(json, type)
+            saved?.forEach { (boardId, list) ->
+                map[boardId] = mutableStateListOf<BoardText>().apply { addAll(list) }
+            }
+        }
+        map
+    }
+
     fun saveData() {
         val editor = prefs.edit()
         editor.putString("boards_key", gson.toJson(boards.toList()))
@@ -217,6 +241,11 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
             entry.value.toList()
         }
         editor.putString("shapes_map_key", gson.toJson(shapesMap))
+
+        val textsMap = boardTextsMap.mapValues { entry ->
+            entry.value.toList()
+        }
+        editor.putString("texts_map_key", gson.toJson(textsMap))
         editor.apply()
     }
 
@@ -227,6 +256,7 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
                 boardStrokesMap = boardStrokesMap,
                 boardNotesMap = boardNotesMap,
                 boardShapesMap = boardShapesMap,
+                boardTextsMap = boardTextsMap,
                 onBoardClick = { boardId, title ->
                     currentScreen = AppScreen.Studio(boardId, title)
                 },
@@ -235,6 +265,7 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
                     boardStrokesMap[newBoard.id] = mutableStateListOf()
                     boardNotesMap[newBoard.id] = mutableStateListOf()
                     boardShapesMap[newBoard.id] = mutableStateListOf()
+                    boardTextsMap[newBoard.id] = mutableStateListOf()
                     saveData()
                     currentScreen = AppScreen.Studio(newBoard.id, newBoard.title)
                 },
@@ -250,6 +281,7 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
                     boardStrokesMap.remove(board.id)
                     boardNotesMap.remove(board.id)
                     boardShapesMap.remove(board.id)
+                    boardTextsMap.remove(board.id)
                     saveData()
                 }
             )
@@ -264,12 +296,16 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
             val activeShapes = remember(screen.boardId) {
                 boardShapesMap.getOrPut(screen.boardId) { mutableStateListOf() }
             }
+            val activeTexts = remember(screen.boardId) {
+                boardTextsMap.getOrPut(screen.boardId) { mutableStateListOf() }
+            }
 
             FreeformStudioCanvasScreen(
                 boardTitle = screen.boardTitle,
                 strokes = activeStrokes,
                 notes = activeNotes,
                 shapes = activeShapes,
+                texts = activeTexts,
                 onDataChanged = { saveData() },
                 onBack = {
                     saveData()
@@ -293,6 +329,7 @@ fun FreeformMainDashboardScreen(
     boardStrokesMap: Map<String, List<CanvasStroke>>,
     boardNotesMap: Map<String, List<StickyNote>>,
     boardShapesMap: Map<String, List<BoardShape>>,
+    boardTextsMap: Map<String, List<BoardText>>,
     onBoardClick: (String, String) -> Unit,
     onCreateBoard: (FreeformBoard) -> Unit,
     onRenameBoard: (FreeformBoard, String) -> Unit,
@@ -440,6 +477,7 @@ fun FreeformMainDashboardScreen(
                                 strokes = boardStrokesMap[board.id] ?: emptyList(),
                                 notes = boardNotesMap[board.id] ?: emptyList(),
                                 shapes = boardShapesMap[board.id] ?: emptyList(),
+                                texts = boardTextsMap[board.id] ?: emptyList(),
                                 onClick = { onBoardClick(board.id, board.title) },
                                 onRename = { newTitle -> onRenameBoard(board, newTitle) },
                                 onDelete = { onDeleteBoard(board) }
@@ -499,6 +537,7 @@ fun DashboardBoardCard(
     strokes: List<CanvasStroke>,
     notes: List<StickyNote>,
     shapes: List<BoardShape>,
+    texts: List<BoardText>,
     onClick: () -> Unit,
     onRename: (String) -> Unit,
     onDelete: () -> Unit
@@ -525,7 +564,7 @@ fun DashboardBoardCard(
                         .background(Color(0xFF1E1E1E))
                 ) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
-                        drawBoardThumbnail(strokes, notes, shapes)
+                        drawBoardThumbnail(strokes, notes, shapes, texts)
                     }
                 }
                 Row(
@@ -607,9 +646,10 @@ fun DashboardBoardCard(
 fun DrawScope.drawBoardThumbnail(
     strokes: List<CanvasStroke>,
     notes: List<StickyNote>,
-    shapes: List<BoardShape>
+    shapes: List<BoardShape>,
+    texts: List<BoardText> = emptyList()
 ) {
-    if (strokes.isEmpty() && notes.isEmpty() && shapes.isEmpty()) {
+    if (strokes.isEmpty() && notes.isEmpty() && shapes.isEmpty() && texts.isEmpty()) {
         drawRect(Color(0xFF1A1A1A))
         return
     }
@@ -631,6 +671,13 @@ fun DrawScope.drawBoardThumbnail(
         minY = minOf(minY, note.y)
         maxX = maxOf(maxX, note.x + note.width)
         maxY = maxOf(maxY, note.y + note.height)
+    }
+
+    texts.forEach { t ->
+        minX = minOf(minX, t.x)
+        minY = minOf(minY, t.y)
+        maxX = maxOf(maxX, t.x + t.width * density)
+        maxY = maxOf(maxY, t.y + maxOf(t.height, t.fontSize * density * 1.4f))
     }
 
     strokes.forEach { stroke ->
@@ -677,6 +724,15 @@ fun DrawScope.drawBoardThumbnail(
                 cornerRadius = CornerRadius(4f, 4f)
             )
         }
+        // Text boxes show up as a soft block in their text colour.
+        texts.forEach { t ->
+            drawRoundRect(
+                color = Color(t.textColor).copy(alpha = 0.55f),
+                topLeft = Offset(t.x, t.y + t.fontSize * density * 0.35f),
+                size = Size(t.width * density * 0.8f, t.fontSize * density * 0.5f),
+                cornerRadius = CornerRadius(6f, 6f)
+            )
+        }
     }
 }
 
@@ -691,6 +747,7 @@ fun FreeformStudioCanvasScreen(
     strokes: MutableList<CanvasStroke>,
     notes: MutableList<StickyNote>,
     shapes: MutableList<BoardShape>,
+    texts: MutableList<BoardText>,
     onDataChanged: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -705,6 +762,7 @@ fun FreeformStudioCanvasScreen(
     var showShapePicker by remember { mutableStateOf(false) }
     var selectedShapeId by remember { mutableStateOf<String?>(null) }
     var selectedNoteId by remember { mutableStateOf<String?>(null) }
+    var selectedTextId by remember { mutableStateOf<String?>(null) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
     val density = LocalDensity.current
 
@@ -713,6 +771,7 @@ fun FreeformStudioCanvasScreen(
         if (selectedTool != StudioTool.PAN) {
             selectedShapeId = null
             selectedNoteId = null
+            selectedTextId = null
         }
     }
 
@@ -747,6 +806,7 @@ fun FreeformStudioCanvasScreen(
         selectedTool = StudioTool.PAN
         selectedShapeId = newShape.id
         selectedNoteId = null
+        selectedTextId = null
         showShapePicker = false
         onDataChanged()
     }
@@ -764,6 +824,10 @@ fun FreeformStudioCanvasScreen(
             onSelectShape = { selectedShapeId = it },
             selectedNoteId = selectedNoteId,
             onSelectNote = { selectedNoteId = it },
+            texts = texts,
+            selectedTextId = selectedTextId,
+            onSelectText = { selectedTextId = it },
+            onTextChanged = onDataChanged,
             scale = scale,
             canvasOffset = canvasOffset,
             onTransform = { pan, zoom, centroid ->
@@ -893,7 +957,32 @@ fun FreeformStudioCanvasScreen(
                         notes.add(note)
                         selectedTool = StudioTool.PAN
                         selectedShapeId = null
+                        selectedTextId = null
                         selectedNoteId = note.id
+                        onDataChanged()
+                    }
+                    // Adds an empty text box in the middle of the screen; the keyboard opens right away.
+                    StudioToolButton(Icons.Default.TextFields, "Text", false) {
+                        showShapePicker = false
+                        showPenColors = false
+                        val center = convertScreenToWorld(
+                            Offset(viewportSize.width / 2f, viewportSize.height / 2f),
+                            canvasOffset,
+                            scale
+                        )
+                        val widthDp = 240f / scale
+                        val widthPx = with(density) { widthDp.dp.toPx() }
+                        val box = BoardText(
+                            x = center.x - widthPx / 2f,
+                            y = center.y - with(density) { (14f / scale).dp.toPx() },
+                            width = widthDp,
+                            fontSize = (28f / scale).coerceIn(8f, 400f)
+                        )
+                        texts.add(box)
+                        selectedTool = StudioTool.PAN
+                        selectedShapeId = null
+                        selectedNoteId = null
+                        selectedTextId = box.id
                         onDataChanged()
                     }
                     StudioToolButton(Icons.Default.Category, "Shapes", showShapePicker) {
@@ -951,6 +1040,10 @@ fun FreeformInteractiveCanvas(
     onTransform: (pan: Offset, zoom: Float, centroid: Offset) -> Unit,
     onStrokeAdded: () -> Unit,
     onNoteChanged: () -> Unit,
+    texts: MutableList<BoardText>,
+    selectedTextId: String?,
+    onSelectText: (String?) -> Unit,
+    onTextChanged: () -> Unit,
     onShapesChanged: () -> Unit,
     onViewportChanged: (IntSize) -> Unit
 ) {
@@ -966,6 +1059,9 @@ fun FreeformInteractiveCanvas(
     val currentSelectedNoteId by rememberUpdatedState(selectedNoteId)
     val currentOnSelectNote by rememberUpdatedState(onSelectNote)
     val currentOnNoteChanged by rememberUpdatedState(onNoteChanged)
+    val currentSelectedTextId by rememberUpdatedState(selectedTextId)
+    val currentOnSelectText by rememberUpdatedState(onSelectText)
+    val currentOnTextChanged by rememberUpdatedState(onTextChanged)
 
     val currentPoints = remember { mutableStateListOf<CanvasStrokePoint>() }
     val isPenActive = (selectedTool == StudioTool.PEN)
@@ -976,6 +1072,21 @@ fun FreeformInteractiveCanvas(
     val shapesInteractive = (selectedTool == StudioTool.PAN)
     var drag by remember { mutableStateOf<ShapeDragState?>(null) }
     var noteDrag by remember { mutableStateOf<NoteDragState?>(null) }
+    var textDrag by remember { mutableStateOf<TextDragState?>(null) }
+
+    // Leaving an empty text box behind removes it, like Freeform.
+    var lastSelectedText by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(selectedTextId) {
+        val previous = lastSelectedText
+        if (previous != null && previous != selectedTextId) {
+            val i = texts.indexOfFirst { it.id == previous }
+            if (i >= 0 && texts[i].text.isBlank()) {
+                texts.removeAt(i)
+                currentOnTextChanged()
+            }
+        }
+        lastSelectedText = selectedTextId
+    }
 
     // Outer box only lays things out. The gesture surface (canvas + notes) is a separate child, and the
     // floating action bars are its siblings, so touches on the bars never reach the canvas gesture handler.
@@ -1027,9 +1138,18 @@ fun FreeformInteractiveCanvas(
                                     false
                                 } else {
                                     // Sticky notes sit above shapes, so they get the first chance to grab the touch.
-                                    val noteStarted = beginNoteDrag(notes, currentSelectedNoteId, world, currentScale, density)
-                                    if (noteStarted != null) {
+                                    val textStarted = beginTextDrag(texts, currentSelectedTextId, world, currentScale, density)
+                                    val noteStarted = if (textStarted == null) beginNoteDrag(notes, currentSelectedNoteId, world, currentScale, density) else null
+                                    if (textStarted != null) {
+                                        currentOnSelectText(textStarted.start.id)
+                                        currentOnSelectNote(null)
+                                        currentOnSelect(null)
+                                        selectedStroke = null
+                                        textDrag = textStarted
+                                        true
+                                    } else if (noteStarted != null) {
                                         currentOnSelectNote(noteStarted.start.id)
+                                        currentOnSelectText(null)
                                         currentOnSelect(null)
                                         selectedStroke = null
                                         noteDrag = noteStarted
@@ -1039,6 +1159,7 @@ fun FreeformInteractiveCanvas(
                                         if (started != null) {
                                             currentOnSelect(started.start.id)
                                             currentOnSelectNote(null)
+                                            currentOnSelectText(null)
                                             selectedStroke = null
                                             drag = started
                                             true
@@ -1054,6 +1175,11 @@ fun FreeformInteractiveCanvas(
                                     val index = notes.indexOfFirst { it.id == nd.start.id }
                                     if (index >= 0) notes[index] = applyNoteDrag(nd, world, density)
                                 }
+                                val td = textDrag
+                                if (td != null) {
+                                    val index = texts.indexOfFirst { it.id == td.start.id }
+                                    if (index >= 0) texts[index] = applyTextDrag(td, world, density)
+                                }
                                 drag?.let { d ->
                                     val index = shapes.indexOfFirst { it.id == d.start.id }
                                     if (index >= 0) {
@@ -1065,11 +1191,14 @@ fun FreeformInteractiveCanvas(
                             onObjectTouchUp = { moved ->
                                 val finished = drag
                                 val finishedNote = noteDrag
+                                val finishedText = textDrag
                                 drag = null
                                 noteDrag = null
+                                textDrag = null
                                 // Persist once per gesture instead of on every move event.
                                 if (moved && finished != null) currentOnShapesChanged()
                                 if (moved && finishedNote != null) currentOnNoteChanged()
+                                if (moved && finishedText != null) currentOnTextChanged()
                             },
                             onEmptyTap = { world ->
                                 // Tap on a pen stroke selects it (so it can be recoloured / deleted).
@@ -1077,6 +1206,7 @@ fun FreeformInteractiveCanvas(
                                 selectedStroke = strokes.lastOrNull { it.hitTest(world, tolerance) }
                                 currentOnSelect(null)
                                 currentOnSelectNote(null)
+                                currentOnSelectText(null)
                             },
                             onErase = { world ->
                                 val tolerance = with(density) { 12.dp.toPx() } / currentScale
@@ -1132,7 +1262,89 @@ fun FreeformInteractiveCanvas(
                 }
             }
 
+            texts.forEach { box ->
+
+                key(box.id) {
+
+                    TextBoxItem(
+
+                        box = box,
+
+                        scale = scale,
+
+                        canvasOffset = canvasOffset,
+
+                        isSelected = shapesInteractive && box.id == selectedTextId,
+
+                        onTextChange = { newText ->
+
+                            val i = texts.indexOfFirst { it.id == box.id }
+
+                            if (i >= 0) {
+
+                                texts[i] = texts[i].copy(text = newText)
+
+                                onTextChanged()
+
+                            }
+
+                        },
+
+                        onHeightMeasured = { h ->
+
+                            val i = texts.indexOfFirst { it.id == box.id }
+
+                            if (i >= 0 && abs(texts[i].height - h) > 0.5f) texts[i] = texts[i].copy(height = h)
+
+                        }
+
+                    )
+
+                }
+
+            }
+
+
         } // end of gesture surface
+
+        // Floating format bar above the selected text box.
+        val textSel = if (shapesInteractive && textDrag == null) texts.firstOrNull { it.id == selectedTextId } else null
+        if (textSel != null) {
+            val textW = with(density) { textSel.width.dp.toPx() }
+            val topLeft = Offset(textSel.x, textSel.y) * scale + canvasOffset
+            val bottomRight = Offset(textSel.x + textW, textSel.y + textSel.height) * scale + canvasOffset
+            TextContextBar(
+                box = textSel,
+                centerX = (topLeft.x + bottomRight.x) / 2f,
+                topY = topLeft.y,
+                bottomY = bottomRight.y,
+                gapPx = with(density) { 16.dp.toPx() },
+                minTopPx = with(density) { 120.dp.toPx() },
+                onChange = { updated ->
+                    val i = texts.indexOfFirst { it.id == updated.id }
+                    if (i >= 0) {
+                        // Keep the measured height; the composable re-measures after the style change.
+                        texts[i] = updated.copy(height = texts[i].height)
+                        onTextChanged()
+                    }
+                },
+                onDuplicate = {
+                    val latest = texts.firstOrNull { it.id == textSel.id }
+                    if (latest != null) {
+                        val nudge = with(density) { 24.dp.toPx() } / scale
+                        val copy = latest.copy(id = UUID.randomUUID().toString(), x = latest.x + nudge, y = latest.y + nudge)
+                        texts.add(copy)
+                        onSelectText(copy.id)
+                        onTextChanged()
+                    }
+                },
+                onDelete = {
+                    texts.removeAll { it.id == textSel.id }
+                    onSelectText(null)
+                    onTextChanged()
+                }
+            )
+        }
 
         // Floating action bar above the selected sticky note.
         val noteSel = if (shapesInteractive && noteDrag == null) notes.firstOrNull { it.id == selectedNoteId } else null
@@ -2319,4 +2531,334 @@ private fun applyNoteDrag(d: NoteDragState, pointer: Offset, density: Density): 
         width = with(density) { newW.toDp().value },
         height = with(density) { newH.toDp().value }
     )
+}
+
+
+// --- 6. TEXT BOXES (Freeform style: free-floating text with a floating format bar) ---
+
+/**
+ * [x]/[y] are world pixels, [width] is in dp (like sticky notes), [fontSize] is in sp.
+ * [height] is measured by the composable (px) and only used for hit-testing and the action bar.
+ */
+data class BoardText(
+    val id: String = UUID.randomUUID().toString(),
+    val text: String = "",
+    val x: Float = 0f,
+    val y: Float = 0f,
+    val width: Float = 240f,
+    val height: Float = 0f,
+    val fontSize: Float = 28f,
+    val textColor: Long = 0xFFFFFFFFL,
+    val bold: Boolean = false,
+    val italic: Boolean = false,
+    val underline: Boolean = false,
+    val align: Int = 0,        // 0 = left, 1 = centre, 2 = right
+    val fontFamily: Int = 0    // 0 = default, 1 = serif, 2 = monospace, 3 = cursive
+)
+
+private fun fontFamilyFor(index: Int): FontFamily = when (index) {
+    1 -> FontFamily.Serif
+    2 -> FontFamily.Monospace
+    3 -> FontFamily.Cursive
+    else -> FontFamily.Default
+}
+
+@Composable
+fun TextBoxItem(
+    box: BoardText,
+    scale: Float,
+    canvasOffset: Offset,
+    isSelected: Boolean,
+    onTextChange: (String) -> Unit,
+    onHeightMeasured: (Float) -> Unit
+) {
+    // Moving / resizing / selecting is done by the canvas gesture handler (see beginTextDrag).
+    var text by remember { mutableStateOf(box.text) }
+    val focusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    val blue = Color(0xFF2196F3)
+
+    // A freshly inserted (empty) box opens the keyboard straight away.
+    LaunchedEffect(Unit) {
+        if (box.text.isEmpty() && isSelected) focusRequester.requestFocus()
+    }
+    LaunchedEffect(isSelected) {
+        if (!isSelected) focusManager.clearFocus()
+    }
+
+    val screenX = canvasOffset.x + box.x * scale
+    val screenY = canvasOffset.y + box.y * scale
+    val color = Color(box.textColor)
+    val style = TextStyle(
+        color = color,
+        fontSize = box.fontSize.sp,
+        lineHeight = (box.fontSize * 1.2f).sp,
+        fontWeight = if (box.bold) FontWeight.Bold else FontWeight.Normal,
+        fontStyle = if (box.italic) FontStyle.Italic else FontStyle.Normal,
+        textDecoration = if (box.underline) TextDecoration.Underline else null,
+        textAlign = when (box.align) {
+            1 -> TextAlign.Center
+            2 -> TextAlign.End
+            else -> TextAlign.Start
+        },
+        fontFamily = fontFamilyFor(box.fontFamily)
+    )
+
+    Box(
+        modifier = Modifier
+            .graphicsLayer {
+                translationX = screenX
+                translationY = screenY
+                scaleX = scale
+                scaleY = scale
+                transformOrigin = TransformOrigin(0f, 0f)
+            }
+            .width(box.width.dp)
+            .onSizeChanged { onHeightMeasured(it.height.toFloat()) }
+            .then(if (isSelected) Modifier.border(1.dp, blue) else Modifier)
+    ) {
+        Box(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+            BasicTextField(
+                value = text,
+                onValueChange = {
+                    text = it
+                    onTextChange(it)
+                },
+                textStyle = style,
+                cursorBrush = SolidColor(color),
+                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                decorationBox = { inner ->
+                    Box {
+                        if (text.isEmpty()) {
+                            Text("Text", style = style.copy(color = color.copy(alpha = 0.35f)))
+                        }
+                        inner()
+                    }
+                }
+            )
+        }
+
+        // Handles (visual only): left / right = change width, green corner = scale the text.
+        if (isSelected) {
+            val dot = Modifier
+                .size(14.dp)
+                .background(Color.White, CircleShape)
+                .padding(2.dp)
+            Box(Modifier.align(Alignment.CenterStart).offset((-7).dp, 0.dp).then(dot).background(blue, CircleShape))
+            Box(Modifier.align(Alignment.CenterEnd).offset(7.dp, 0.dp).then(dot).background(blue, CircleShape))
+            Box(Modifier.align(Alignment.BottomEnd).offset(7.dp, 7.dp).then(dot).background(Color(0xFF34C759), CircleShape))
+        }
+    }
+}
+
+private enum class TextDragMode { MOVE, LEFT, RIGHT, SCALE }
+
+private class TextDragState(
+    val mode: TextDragMode,
+    val start: BoardText,
+    val startPointer: Offset,
+    val grab: Offset = Offset.Zero
+)
+
+private fun textSizePx(t: BoardText, density: Density): Offset =
+    Offset(with(density) { t.width.dp.toPx() }, t.height)
+
+private fun beginTextDrag(
+    texts: List<BoardText>,
+    selectedId: String?,
+    world: Offset,
+    zoom: Float,
+    density: Density
+): TextDragState? {
+    val handleRadius = with(density) { 20.dp.toPx() } / zoom
+
+    val selected = texts.firstOrNull { it.id == selectedId }
+    if (selected != null) {
+        val size = textSizePx(selected, density)
+        val handles = listOf(
+            TextDragMode.LEFT to Offset(selected.x, selected.y + size.y / 2f),
+            TextDragMode.RIGHT to Offset(selected.x + size.x, selected.y + size.y / 2f),
+            TextDragMode.SCALE to Offset(selected.x + size.x, selected.y + size.y)
+        )
+        for ((mode, pos) in handles) {
+            if ((world - pos).getDistance() <= handleRadius) {
+                return TextDragState(mode, selected, world, world - pos)
+            }
+        }
+    }
+
+    val hit = texts.lastOrNull { t ->
+        val size = textSizePx(t, density)
+        world.x in t.x..(t.x + size.x) && world.y in t.y..(t.y + size.y)
+    } ?: return null
+    return TextDragState(TextDragMode.MOVE, hit, world)
+}
+
+private fun applyTextDrag(d: TextDragState, pointer: Offset, density: Density): BoardText {
+    val s = d.start
+    if (d.mode == TextDragMode.MOVE) {
+        return s.copy(x = s.x + (pointer.x - d.startPointer.x), y = s.y + (pointer.y - d.startPointer.y))
+    }
+    val size = textSizePx(s, density)
+    val p = pointer - d.grab
+    val minPx = with(density) { 48.dp.toPx() }
+    return when (d.mode) {
+        TextDragMode.RIGHT -> {
+            val newW = max(minPx, p.x - s.x)
+            s.copy(width = with(density) { newW.toDp().value })
+        }
+        TextDragMode.LEFT -> {
+            val anchorX = s.x + size.x
+            val newW = max(minPx, anchorX - p.x)
+            s.copy(x = anchorX - newW, width = with(density) { newW.toDp().value })
+        }
+        TextDragMode.SCALE -> {
+            val newW = max(minPx, p.x - s.x)
+            val factor = if (size.x > 0f) newW / size.x else 1f
+            s.copy(
+                width = with(density) { newW.toDp().value },
+                fontSize = (s.fontSize * factor).coerceIn(8f, 400f)
+            )
+        }
+        TextDragMode.MOVE -> s
+    }
+}
+
+/** Floating bar for the selected text box: colour, format panel (B / I / U / font / alignment), size, duplicate, delete. */
+@Composable
+private fun TextContextBar(
+    box: BoardText,
+    centerX: Float,
+    topY: Float,
+    bottomY: Float,
+    gapPx: Float,
+    minTopPx: Float,
+    onChange: (BoardText) -> Unit,
+    onDuplicate: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var showColors by remember(box.id) { mutableStateOf(false) }
+    var showFormat by remember(box.id) { mutableStateOf(false) }
+    val primary = MaterialTheme.colorScheme.primary
+    val onPrimary = MaterialTheme.colorScheme.onPrimary
+    val chipBg = MaterialTheme.colorScheme.surfaceContainerHighest
+
+    @Composable
+    fun Chip(selected: Boolean, label: String, onClick: () -> Unit, content: @Composable () -> Unit) {
+        Box(
+            modifier = Modifier
+                .padding(2.dp)
+                .size(width = 52.dp, height = 36.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (selected) primary else chipBg)
+                .clickable(onClick = onClick)
+                .semantics { contentDescription = label },
+            contentAlignment = Alignment.Center
+        ) { content() }
+    }
+
+    Surface(
+        modifier = Modifier.layout { measurable, constraints ->
+            val placeable = measurable.measure(constraints.copy(minWidth = 0, minHeight = 0))
+            layout(constraints.maxWidth, constraints.maxHeight) {
+                val x = (centerX - placeable.width / 2f).roundToInt()
+                    .coerceIn(0, (constraints.maxWidth - placeable.width).coerceAtLeast(0))
+                var y = (topY - gapPx - placeable.height).roundToInt()
+                if (y < minTopPx) y = (bottomY + gapPx / 2f).roundToInt()
+                y = y.coerceIn(0, (constraints.maxHeight - placeable.height).coerceAtLeast(0))
+                placeable.place(x, y)
+            }
+        },
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shadowElevation = 6.dp
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+            if (showFormat && !showColors) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Chip(box.bold, "Bold", { onChange(box.copy(bold = !box.bold)) }) {
+                        Icon(Icons.Default.FormatBold, null, tint = if (box.bold) onPrimary else MaterialTheme.colorScheme.onSurface)
+                    }
+                    Chip(box.italic, "Italic", { onChange(box.copy(italic = !box.italic)) }) {
+                        Icon(Icons.Default.FormatItalic, null, tint = if (box.italic) onPrimary else MaterialTheme.colorScheme.onSurface)
+                    }
+                    Chip(box.underline, "Underline", { onChange(box.copy(underline = !box.underline)) }) {
+                        Icon(Icons.Default.FormatUnderlined, null, tint = if (box.underline) onPrimary else MaterialTheme.colorScheme.onSurface)
+                    }
+                    Chip(false, "Font", { onChange(box.copy(fontFamily = (box.fontFamily + 1) % 4)) }) {
+                        Text("Aa", fontFamily = fontFamilyFor(box.fontFamily), color = MaterialTheme.colorScheme.onSurface)
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val alignIcon = when (box.align) {
+                        1 -> Icons.Default.FormatAlignCenter
+                        2 -> Icons.Default.FormatAlignRight
+                        else -> Icons.Default.FormatAlignLeft
+                    }
+                    Chip(false, "Alignment", { onChange(box.copy(align = (box.align + 1) % 3)) }) {
+                        Icon(alignIcon, null, tint = MaterialTheme.colorScheme.onSurface)
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (showColors) {
+                    PEN_PALETTE.forEach { c ->
+                        Box(
+                            modifier = Modifier
+                                .padding(4.dp)
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(Color(c))
+                                .then(if (c == box.textColor) Modifier.border(2.dp, primary, CircleShape) else Modifier.border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape))
+                                .clickable {
+                                    onChange(box.copy(textColor = c))
+                                    showColors = false
+                                }
+                        )
+                    }
+                    IconButton(onClick = { showColors = false }, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close colors")
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 8.dp)
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(Color(box.textColor))
+                            .border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape)
+                            .clickable { showColors = true }
+                            .semantics { contentDescription = "Text colour" }
+                    )
+                    TextButton(onClick = { showFormat = !showFormat }) {
+                        Text("Aa", color = if (showFormat) primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    val step = max(2, (box.fontSize * 0.1f).roundToInt())
+                    IconButton(
+                        onClick = { onChange(box.copy(fontSize = (box.fontSize - step).coerceAtLeast(8f))) },
+                        modifier = Modifier.size(36.dp)
+                    ) { Icon(Icons.Default.Remove, contentDescription = "Smaller") }
+                    Text(
+                        text = box.fontSize.roundToInt().toString(),
+                        modifier = Modifier.widthIn(min = 28.dp),
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    IconButton(
+                        onClick = { onChange(box.copy(fontSize = (box.fontSize + step).coerceAtMost(400f))) },
+                        modifier = Modifier.size(36.dp)
+                    ) { Icon(Icons.Default.Add, contentDescription = "Larger") }
+                    VerticalDivider(modifier = Modifier.height(24.dp).padding(horizontal = 4.dp))
+                    IconButton(onClick = onDuplicate, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate")
+                    }
+                    IconButton(onClick = onDelete, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+    }
 }
