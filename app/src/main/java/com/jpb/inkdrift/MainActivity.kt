@@ -586,12 +586,16 @@ fun FreeformStudioCanvasScreen(
 
     var showShapePicker by remember { mutableStateOf(false) }
     var selectedShapeId by remember { mutableStateOf<String?>(null) }
+    var selectedNoteId by remember { mutableStateOf<String?>(null) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
     val density = LocalDensity.current
 
     // Shapes can only be selected while the select/pan tool is active.
     LaunchedEffect(selectedTool) {
-        if (selectedTool != StudioTool.PAN) selectedShapeId = null
+        if (selectedTool != StudioTool.PAN) {
+            selectedShapeId = null
+            selectedNoteId = null
+        }
     }
 
     fun insertShape(type: ShapeType) {
@@ -624,6 +628,7 @@ fun FreeformStudioCanvasScreen(
         shapes.add(newShape)
         selectedTool = StudioTool.PAN
         selectedShapeId = newShape.id
+        selectedNoteId = null
         showShapePicker = false
         onDataChanged()
     }
@@ -639,6 +644,8 @@ fun FreeformStudioCanvasScreen(
             shapes = shapes,
             selectedShapeId = selectedShapeId,
             onSelectShape = { selectedShapeId = it },
+            selectedNoteId = selectedNoteId,
+            onSelectNote = { selectedNoteId = it },
             scale = scale,
             canvasOffset = canvasOffset,
             onTransform = { pan, zoom, centroid ->
@@ -747,19 +754,28 @@ fun FreeformStudioCanvasScreen(
                         showShapePicker = false
                         showPenColors = false
                     }
-                    StudioToolButton(Icons.AutoMirrored.Filled.StickyNote2, "Note", selectedTool == StudioTool.NOTE) {
-                        selectedTool = StudioTool.NOTE
+                    // Adds a note in the middle of the screen and selects it, ready to move / resize / recolour.
+                    StudioToolButton(Icons.AutoMirrored.Filled.StickyNote2, "Note", false) {
                         showShapePicker = false
                         showPenColors = false
-                        val worldCenterX = -canvasOffset.x / scale + 400f
-                        val worldCenterY = -canvasOffset.y / scale + 400f
-                        notes.add(
-                            StickyNote(
-                                x = worldCenterX,
-                                y = worldCenterY,
-                                text = "Sticky note"
-                            )
+                        val center = convertScreenToWorld(
+                            Offset(viewportSize.width / 2f, viewportSize.height / 2f),
+                            canvasOffset,
+                            scale
                         )
+                        val sizeDp = 220f / scale // looks ~220dp on screen at the current zoom
+                        val halfPx = with(density) { (sizeDp / 2f).dp.toPx() }
+                        val note = StickyNote(
+                            x = center.x - halfPx,
+                            y = center.y - halfPx,
+                            width = sizeDp,
+                            height = sizeDp,
+                            text = "Sticky note"
+                        )
+                        notes.add(note)
+                        selectedTool = StudioTool.PAN
+                        selectedShapeId = null
+                        selectedNoteId = note.id
                         onDataChanged()
                     }
                     StudioToolButton(Icons.Default.Category, "Shapes", showShapePicker) {
@@ -810,6 +826,8 @@ fun FreeformInteractiveCanvas(
     shapes: MutableList<BoardShape>,
     selectedShapeId: String?,
     onSelectShape: (String?) -> Unit,
+    selectedNoteId: String?,
+    onSelectNote: (String?) -> Unit,
     scale: Float,
     canvasOffset: Offset,
     onTransform: (pan: Offset, zoom: Float, centroid: Offset) -> Unit,
@@ -827,6 +845,9 @@ fun FreeformInteractiveCanvas(
     val currentSelectedId by rememberUpdatedState(selectedShapeId)
     val currentOnSelect by rememberUpdatedState(onSelectShape)
     val currentOnShapesChanged by rememberUpdatedState(onShapesChanged)
+    val currentSelectedNoteId by rememberUpdatedState(selectedNoteId)
+    val currentOnSelectNote by rememberUpdatedState(onSelectNote)
+    val currentOnNoteChanged by rememberUpdatedState(onNoteChanged)
 
     val currentPoints = remember { mutableStateListOf<CanvasStrokePoint>() }
     val isPenActive = (selectedTool == StudioTool.PEN)
@@ -836,6 +857,7 @@ fun FreeformInteractiveCanvas(
     LaunchedEffect(selectedTool) { selectedStroke = null }
     val shapesInteractive = (selectedTool == StudioTool.PAN)
     var drag by remember { mutableStateOf<ShapeDragState?>(null) }
+    var noteDrag by remember { mutableStateOf<NoteDragState?>(null) }
 
     // Outer box only lays things out. The gesture surface (canvas + notes) is a separate child, and the
     // floating action bars are its siblings, so touches on the bars never reach the canvas gesture handler.
@@ -886,18 +908,34 @@ fun FreeformInteractiveCanvas(
                                 if (!shapesInteractive) {
                                     false
                                 } else {
-                                    val started = beginShapeDrag(shapes, currentSelectedId, notes, world, currentScale, density)
-                                    if (started != null) {
-                                        currentOnSelect(started.start.id)
+                                    // Sticky notes sit above shapes, so they get the first chance to grab the touch.
+                                    val noteStarted = beginNoteDrag(notes, currentSelectedNoteId, world, currentScale, density)
+                                    if (noteStarted != null) {
+                                        currentOnSelectNote(noteStarted.start.id)
+                                        currentOnSelect(null)
                                         selectedStroke = null
-                                        drag = started
+                                        noteDrag = noteStarted
                                         true
                                     } else {
-                                        false
+                                        val started = beginShapeDrag(shapes, currentSelectedId, world, currentScale, density)
+                                        if (started != null) {
+                                            currentOnSelect(started.start.id)
+                                            currentOnSelectNote(null)
+                                            selectedStroke = null
+                                            drag = started
+                                            true
+                                        } else {
+                                            false
+                                        }
                                     }
                                 }
                             },
                             onObjectDrag = { world ->
+                                val nd = noteDrag
+                                if (nd != null) {
+                                    val index = notes.indexOfFirst { it.id == nd.start.id }
+                                    if (index >= 0) notes[index] = applyNoteDrag(nd, world, density)
+                                }
                                 drag?.let { d ->
                                     val index = shapes.indexOfFirst { it.id == d.start.id }
                                     if (index >= 0) {
@@ -908,15 +946,19 @@ fun FreeformInteractiveCanvas(
                             },
                             onObjectTouchUp = { moved ->
                                 val finished = drag
+                                val finishedNote = noteDrag
                                 drag = null
+                                noteDrag = null
                                 // Persist once per gesture instead of on every move event.
                                 if (moved && finished != null) currentOnShapesChanged()
+                                if (moved && finishedNote != null) currentOnNoteChanged()
                             },
                             onEmptyTap = { world ->
                                 // Tap on a pen stroke selects it (so it can be recoloured / deleted).
                                 val tolerance = with(density) { 14.dp.toPx() } / currentScale
                                 selectedStroke = strokes.lastOrNull { it.hitTest(world, tolerance) }
                                 currentOnSelect(null)
+                                currentOnSelectNote(null)
                             },
                             onErase = { world ->
                                 val tolerance = with(density) { 12.dp.toPx() } / currentScale
@@ -955,19 +997,73 @@ fun FreeformInteractiveCanvas(
             }
 
             notes.forEach { note ->
-                StickyNoteItem(
-                    note = note,
-                    scale = scale,
-                    canvasOffset = canvasOffset,
-                    onNoteChanged = onNoteChanged,
-                    onDelete = {
-                        notes.remove(note)
-                        onNoteChanged()
-                    }
-                )
+                key(note.id) {
+                    StickyNoteItem(
+                        note = note,
+                        scale = scale,
+                        canvasOffset = canvasOffset,
+                        isSelected = shapesInteractive && note.id == selectedNoteId,
+                        onTextChange = { newText ->
+                            val i = notes.indexOfFirst { it.id == note.id }
+                            if (i >= 0) {
+                                notes[i] = notes[i].copy(text = newText)
+                                onNoteChanged()
+                            }
+                        }
+                    )
+                }
             }
 
         } // end of gesture surface
+
+        // Floating action bar above the selected sticky note.
+        val noteSel = if (shapesInteractive && noteDrag == null) notes.firstOrNull { it.id == selectedNoteId } else null
+        if (noteSel != null) {
+            val noteW = with(density) { noteSel.width.dp.toPx() }
+            val noteH = with(density) { noteSel.height.dp.toPx() }
+            val topLeft = Offset(noteSel.x, noteSel.y) * scale + canvasOffset
+            val bottomRight = Offset(noteSel.x + noteW, noteSel.y + noteH) * scale + canvasOffset
+            ShapeContextBar(
+                shapeId = noteSel.id,
+                centerX = (topLeft.x + bottomRight.x) / 2f,
+                topY = topLeft.y,
+                bottomY = bottomRight.y,
+                gapPx = with(density) { 16.dp.toPx() },
+                minTopPx = with(density) { 120.dp.toPx() },
+                currentColor = noteSel.colorValue,
+                palette = NOTE_PALETTE,
+                onColor = { c ->
+                    val i = notes.indexOfFirst { it.id == noteSel.id }
+                    if (i >= 0) {
+                        notes[i] = notes[i].copy(colorValue = c)
+                        onNoteChanged()
+                    }
+                },
+                onDuplicate = {
+                    val latest = notes.firstOrNull { it.id == noteSel.id }
+                    if (latest != null) {
+                        val nudge = with(density) { 24.dp.toPx() } / scale
+                        val copy = latest.copy(id = UUID.randomUUID().toString(), x = latest.x + nudge, y = latest.y + nudge)
+                        notes.add(copy)
+                        onSelectNote(copy.id)
+                        onNoteChanged()
+                    }
+                },
+                onBringToFront = {
+                    val latest = notes.firstOrNull { it.id == noteSel.id }
+                    if (latest != null) {
+                        notes.removeAll { it.id == latest.id }
+                        notes.add(latest)
+                        onNoteChanged()
+                    }
+                },
+                onDelete = {
+                    notes.removeAll { it.id == noteSel.id }
+                    onSelectNote(null)
+                    onNoteChanged()
+                }
+            )
+        }
 
         // Floating action bar above the selected pen stroke.
         val strokeSel = if (shapesInteractive && drag == null) selectedStroke else null
@@ -1060,16 +1156,16 @@ fun StickyNoteItem(
     note: StickyNote,
     scale: Float,
     canvasOffset: Offset,
-    onNoteChanged: () -> Unit,
-    onDelete: () -> Unit
+    isSelected: Boolean,
+    onTextChange: (String) -> Unit
 ) {
-    var text by remember(note.text) { mutableStateOf(note.text) }
-    var posX by remember { mutableFloatStateOf(note.x) }
-    var posY by remember { mutableFloatStateOf(note.y) }
-    var isSelected by remember { mutableStateOf(false) }
+    // Moving / resizing / selecting is handled by the canvas gesture handler (see beginNoteDrag);
+    // this composable only draws the note and owns the text field.
+    var text by remember { mutableStateOf(note.text) }
 
-    val screenX = canvasOffset.x + posX * scale
-    val screenY = canvasOffset.y + posY * scale
+    val screenX = canvasOffset.x + note.x * scale
+    val screenY = canvasOffset.y + note.y * scale
+    val blue = Color(0xFF2196F3)
 
     Box(
         modifier = Modifier
@@ -1083,88 +1179,33 @@ fun StickyNoteItem(
             .size(width = note.width.dp, height = note.height.dp)
             .shadow(8.dp, RoundedCornerShape(4.dp))
             .background(Color(note.colorValue), RoundedCornerShape(4.dp))
-            .clickable { isSelected = !isSelected }
-            .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    posX += dragAmount.x / scale
-                    posY += dragAmount.y / scale
-                    note.x = posX
-                    note.y = posY
-                    onNoteChanged()
-                }
-            }
-            .padding(12.dp)
+            .then(if (isSelected) Modifier.border(2.dp, blue, RoundedCornerShape(4.dp)) else Modifier)
     ) {
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
-                if (isSelected) {
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = "Delete Note",
-                            tint = Color.DarkGray,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-            }
-
+        Box(modifier = Modifier.fillMaxSize().padding(12.dp)) {
             BasicTextField(
                 value = text,
                 onValueChange = {
                     text = it
-                    note.text = it
-                    onNoteChanged()
+                    onTextChange(it)
                 },
-                textStyle = MaterialTheme.typography.bodyLarge.copy(
-                    color = Color(0xFF212121)
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = Color(0xFF212121)),
+                modifier = Modifier.fillMaxSize()
             )
         }
 
-        // 4 Blue corner dots (selection handles like Apple Freeform)
+        // Corner resize handles (visual only; the canvas gesture handler does the actual resizing).
         if (isSelected) {
-            Box(modifier = Modifier.fillMaxSize()) {
+            val alignments = listOf(Alignment.TopStart, Alignment.TopEnd, Alignment.BottomStart, Alignment.BottomEnd)
+            val offsets = listOf((-7).dp to (-7).dp, 7.dp to (-7).dp, (-7).dp to 7.dp, 7.dp to 7.dp)
+            alignments.forEachIndexed { i, alignment ->
                 Box(
                     modifier = Modifier
-                        .size(10.dp)
-                        .align(Alignment.TopStart)
-                        .offset((-4).dp, (-4).dp)
-                        .background(Color(0xFF2196F3), CircleShape)
-                )
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .align(Alignment.TopEnd)
-                        .offset(4.dp, (-4).dp)
-                        .background(Color(0xFF2196F3), CircleShape)
-                )
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .align(Alignment.BottomStart)
-                        .offset((-4).dp, 4.dp)
-                        .background(Color(0xFF2196F3), CircleShape)
-                )
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .align(Alignment.BottomEnd)
-                        .offset(4.dp, 4.dp)
-                        .background(Color(0xFF2196F3), CircleShape)
+                        .align(alignment)
+                        .offset(offsets[i].first, offsets[i].second)
+                        .size(14.dp)
+                        .background(Color.White, CircleShape)
+                        .padding(2.dp)
+                        .background(blue, CircleShape)
                 )
             }
         }
@@ -1454,7 +1495,6 @@ private class ShapeDragState(
 private fun beginShapeDrag(
     shapes: List<BoardShape>,
     selectedId: String?,
-    notes: List<StickyNote>,
     world: Offset,
     zoom: Float,
     density: Density
@@ -1488,15 +1528,7 @@ private fun beginShapeDrag(
         }
     }
 
-    // 2. Sticky notes are composables drawn above the canvas; don't steal their touches.
-    val overNote = notes.any { n ->
-        val w = with(density) { n.width.dp.toPx() }
-        val h = with(density) { n.height.dp.toPx() }
-        world.x in n.x..(n.x + w) && world.y in n.y..(n.y + h)
-    }
-    if (overNote) return null
-
-    // 3. Otherwise grab the top-most shape under the finger.
+    // 2. Otherwise grab the top-most shape under the finger.
     val hit = shapes.lastOrNull { it.hitTest(world, lineTolerance) } ?: return null
     return ShapeDragState(DragMode.MOVE, hit, world)
 }
@@ -1963,6 +1995,7 @@ private fun ShapeContextBar(
     gapPx: Float,
     minTopPx: Float,
     currentColor: Long,
+    palette: List<Long> = SHAPE_PALETTE,
     onColor: (Long) -> Unit,
     onDuplicate: (() -> Unit)?,
     onBringToFront: (() -> Unit)?,
@@ -1992,7 +2025,7 @@ private fun ShapeContextBar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (showColors) {
-                SHAPE_PALETTE.forEach { c ->
+                palette.forEach { c ->
                     Box(
                         modifier = Modifier
                             .padding(4.dp)
@@ -2095,4 +2128,76 @@ private fun PenColorPopup(selected: Color, onPick: (Color) -> Unit, modifier: Mo
             }
         }
     }
+}
+
+// --- 5. STICKY NOTE SELECTION / MOVE / RESIZE ---
+
+private val NOTE_PALETTE = listOf(
+    0xFFFFEE58L, 0xFFFFB74DL, 0xFFF48FB1L, 0xFF81D4FAL,
+    0xFFA5D6A7L, 0xFFCE93D8L, 0xFFFFFFFFL, 0xFFB0BEC5L
+)
+
+private class NoteDragState(
+    val resize: Boolean,
+    val start: StickyNote,
+    val startPointer: Offset,
+    val corner: Offset = Offset.Zero,
+    val grab: Offset = Offset.Zero
+)
+
+/** Notes are sized in dp inside a layer that is scaled by the zoom, so in world units they are dp * density. */
+private fun noteSizePx(n: StickyNote, density: Density): Offset =
+    Offset(with(density) { n.width.dp.toPx() }, with(density) { n.height.dp.toPx() })
+
+private fun beginNoteDrag(
+    notes: List<StickyNote>,
+    selectedId: String?,
+    world: Offset,
+    zoom: Float,
+    density: Density
+): NoteDragState? {
+    val handleRadius = with(density) { 20.dp.toPx() } / zoom
+
+    // Corner handles of the selected note come first.
+    val selected = notes.firstOrNull { it.id == selectedId }
+    if (selected != null) {
+        val size = noteSizePx(selected, density)
+        for (corner in CORNERS) {
+            val pos = Offset(
+                selected.x + if (corner.x > 0f) size.x else 0f,
+                selected.y + if (corner.y > 0f) size.y else 0f
+            )
+            if ((world - pos).getDistance() <= handleRadius) {
+                return NoteDragState(true, selected, world, corner, world - pos)
+            }
+        }
+    }
+
+    // Otherwise the top-most note under the finger.
+    val hit = notes.lastOrNull { n ->
+        val size = noteSizePx(n, density)
+        world.x in n.x..(n.x + size.x) && world.y in n.y..(n.y + size.y)
+    } ?: return null
+    return NoteDragState(false, hit, world)
+}
+
+private fun applyNoteDrag(d: NoteDragState, pointer: Offset, density: Density): StickyNote {
+    val s = d.start
+    if (!d.resize) {
+        return s.copy(x = s.x + (pointer.x - d.startPointer.x), y = s.y + (pointer.y - d.startPointer.y))
+    }
+    // Dragged corner follows the finger; the opposite corner stays where it was.
+    val size = noteSizePx(s, density)
+    val p = pointer - d.grab
+    val minPx = with(density) { 80.dp.toPx() }
+    val anchorX = if (d.corner.x > 0f) s.x else s.x + size.x
+    val anchorY = if (d.corner.y > 0f) s.y else s.y + size.y
+    val newW = max(minPx, (p.x - anchorX) * d.corner.x)
+    val newH = max(minPx, (p.y - anchorY) * d.corner.y)
+    return s.copy(
+        x = if (d.corner.x > 0f) anchorX else anchorX - newW,
+        y = if (d.corner.y > 0f) anchorY else anchorY - newH,
+        width = with(density) { newW.toDp().value },
+        height = with(density) { newH.toDp().value }
+    )
 }
