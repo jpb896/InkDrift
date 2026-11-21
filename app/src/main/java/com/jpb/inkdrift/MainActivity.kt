@@ -279,11 +279,7 @@ fun FreeformAppRoot(prefs: android.content.SharedPreferences, gson: Gson) {
 // --- 1. DASHBOARD SCREEN ---
 
 enum class FreeformCategory(val label: String, val icon: ImageVector) {
-    ALL("All Boards", Icons.Default.Dashboard),
-    RECENTS("Recents", Icons.Default.Schedule),
-    SHARED("Shared", Icons.Default.People),
-    FAVORITES("Favorites", Icons.Default.Favorite),
-    DELETED("Recently Deleted", Icons.Default.Delete)
+    ALL("All Boards", Icons.Default.Dashboard)
 }
 
 @Composable
@@ -312,8 +308,8 @@ fun FreeformMainDashboardScreen(
                         .padding(24.dp)
                 ) {
                     Text(
-                        text = "Freeform",
-                        style = MaterialTheme.typography.headlineLarge,
+                        text = "InkDrift",
+                        style = MaterialTheme.typography.headlineLargeEmphasized,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(bottom = 24.dp)
                     )
