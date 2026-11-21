@@ -45,7 +45,9 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -563,7 +565,7 @@ fun DashboardBoardCard(
 
 // --- 2. INFINITE CANVAS STUDIO SCREEN & DRAWING ENGINE ---
 
-enum class StudioTool { PAN, PEN, NOTE }
+enum class StudioTool { PAN, PEN, ERASER, NOTE }
 
 @Composable
 fun FreeformStudioCanvasScreen(
@@ -575,7 +577,8 @@ fun FreeformStudioCanvasScreen(
     onBack: () -> Unit
 ) {
     var selectedTool by remember { mutableStateOf(StudioTool.PEN) }
-    val activeColor by remember { mutableStateOf(Color(0xFFFFFFFF)) }
+    var activeColor by remember { mutableStateOf(Color(0xFFFFFFFF)) }
+    var showPenColors by remember { mutableStateOf(false) }
     val baseStrokeWidth by remember { mutableFloatStateOf(12f) }
 
     var scale by remember { mutableFloatStateOf(1f) }
@@ -689,6 +692,28 @@ fun FreeformStudioCanvasScreen(
             )
         }
 
+        if (showPenColors && selectedTool == StudioTool.PEN) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { showPenColors = false }
+            )
+            PenColorPopup(
+                selected = activeColor,
+                onPick = {
+                    activeColor = it
+                    showPenColors = false
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 108.dp)
+            )
+        }
+
         Box(modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 32.dp)) {
             Surface(
                 modifier = Modifier.shadow(8.dp, RoundedCornerShape(32.dp)),
@@ -705,14 +730,27 @@ fun FreeformStudioCanvasScreen(
                     StudioToolButton(Icons.Default.PanTool, "Select", selectedTool == StudioTool.PAN) {
                         selectedTool = StudioTool.PAN
                         showShapePicker = false
+                        showPenColors = false
                     }
-                    StudioToolButton(Icons.Default.Edit, "Pen", selectedTool == StudioTool.PEN) {
-                        selectedTool = StudioTool.PEN
+                    // Tap Pen once to select it, tap again to pick a colour.
+                    StudioToolButton(Icons.Default.Edit, "Pen", selectedTool == StudioTool.PEN, dotColor = activeColor) {
+                        if (selectedTool == StudioTool.PEN) {
+                            showPenColors = !showPenColors
+                        } else {
+                            selectedTool = StudioTool.PEN
+                            showPenColors = false
+                        }
                         showShapePicker = false
+                    }
+                    StudioToolButton(EraserIcon, "Eraser", selectedTool == StudioTool.ERASER) {
+                        selectedTool = StudioTool.ERASER
+                        showShapePicker = false
+                        showPenColors = false
                     }
                     StudioToolButton(Icons.AutoMirrored.Filled.StickyNote2, "Note", selectedTool == StudioTool.NOTE) {
                         selectedTool = StudioTool.NOTE
                         showShapePicker = false
+                        showPenColors = false
                         val worldCenterX = -canvasOffset.x / scale + 400f
                         val worldCenterY = -canvasOffset.y / scale + 400f
                         notes.add(
@@ -726,6 +764,7 @@ fun FreeformStudioCanvasScreen(
                     }
                     StudioToolButton(Icons.Default.Category, "Shapes", showShapePicker) {
                         showShapePicker = !showShapePicker
+                        showPenColors = false
                     }
                 }
             }
@@ -734,12 +773,30 @@ fun FreeformStudioCanvasScreen(
 }
 
 @Composable
-fun StudioToolButton(icon: ImageVector, label: String, isSelected: Boolean, onClick: () -> Unit) {
+fun StudioToolButton(
+    icon: ImageVector,
+    label: String,
+    isSelected: Boolean,
+    dotColor: Color? = null,
+    onClick: () -> Unit
+) {
     val bg = if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
     val tint = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
 
-    IconButton(onClick = onClick, modifier = Modifier.size(48.dp).clip(CircleShape).background(bg)) {
-        Icon(icon, contentDescription = label, tint = tint)
+    Box {
+        IconButton(onClick = onClick, modifier = Modifier.size(48.dp).clip(CircleShape).background(bg)) {
+            Icon(icon, contentDescription = label, tint = tint)
+        }
+        if (dotColor != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .size(12.dp)
+                    .background(dotColor, CircleShape)
+                    .border(1.dp, Color.Black.copy(alpha = 0.4f), CircleShape)
+            )
+        }
     }
 }
 
@@ -773,110 +830,172 @@ fun FreeformInteractiveCanvas(
 
     val currentPoints = remember { mutableStateListOf<CanvasStrokePoint>() }
     val isPenActive = (selectedTool == StudioTool.PEN)
+    val isEraserActive = (selectedTool == StudioTool.ERASER)
+    var selectedStroke by remember { mutableStateOf<CanvasStroke?>(null) }
+    val erasedSomething = remember { booleanArrayOf(false) }
+    LaunchedEffect(selectedTool) { selectedStroke = null }
     val shapesInteractive = (selectedTool == StudioTool.PAN)
     var drag by remember { mutableStateOf<ShapeDragState?>(null) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .onSizeChanged { onViewportChanged(it) }
-            .pointerInput(selectedTool, activeColor, baseStrokeWidth) {
-                if (selectedTool == StudioTool.NOTE) {
-                    detectTapGestures(
-                        onTap = { tapOffset ->
-                            val worldPos = convertScreenToWorld(tapOffset, currentOffset, currentScale)
-                            notes.add(
-                                StickyNote(
-                                    x = worldPos.x - 110f,
-                                    y = worldPos.y - 110f,
-                                    text = "Sticky note"
+    // Outer box only lays things out. The gesture surface (canvas + notes) is a separate child, and the
+    // floating action bars are its siblings, so touches on the bars never reach the canvas gesture handler.
+    Box(modifier = Modifier.fillMaxSize().onSizeChanged { onViewportChanged(it) }) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(selectedTool, activeColor, baseStrokeWidth) {
+                    if (selectedTool == StudioTool.NOTE) {
+                        detectTapGestures(
+                            onTap = { tapOffset ->
+                                val worldPos = convertScreenToWorld(tapOffset, currentOffset, currentScale)
+                                notes.add(
+                                    StickyNote(
+                                        x = worldPos.x - 110f,
+                                        y = worldPos.y - 110f,
+                                        text = "Sticky note"
+                                    )
                                 )
-                            )
-                            onNoteChanged()
-                        }
-                    )
-                } else {
-                    detectCanvasGestures(
-                        isPenActive = isPenActive,
-                        getCanvasOffset = { currentOffset },
-                        getScale = { currentScale },
-                        onTransform = onTransform,
-                        onStrokeStart = { point ->
-                            currentPoints.clear()
-                            currentPoints.add(point)
-                        },
-                        onStrokeMove = { point ->
-                            val last = currentPoints.lastOrNull()
-                            if (last == null || (point.position - last.position).getDistance() > 1f) {
-                                currentPoints.add(point)
+                                onNoteChanged()
                             }
-                        },
-                        onStrokeEnd = {
-                            if (currentPoints.isNotEmpty()) {
-                                strokes.add(CanvasStroke(points = currentPoints.toList(), color = activeColor, baseWidth = baseStrokeWidth))
+                        )
+                    } else {
+                        detectCanvasGestures(
+                            isPenActive = isPenActive,
+                            isEraserActive = isEraserActive,
+                            getCanvasOffset = { currentOffset },
+                            getScale = { currentScale },
+                            onTransform = onTransform,
+                            onStrokeStart = { point ->
                                 currentPoints.clear()
-                                onStrokeAdded()
-                            }
-                        },
-                        onObjectTouchDown = { world ->
-                            if (!shapesInteractive) {
-                                false
-                            } else {
-                                val started = beginShapeDrag(shapes, currentSelectedId, notes, world, currentScale, density)
-                                if (started != null) {
-                                    currentOnSelect(started.start.id)
-                                    drag = started
-                                    true
-                                } else {
+                                currentPoints.add(point)
+                            },
+                            onStrokeMove = { point ->
+                                val last = currentPoints.lastOrNull()
+                                if (last == null || (point.position - last.position).getDistance() > 1f) {
+                                    currentPoints.add(point)
+                                }
+                            },
+                            onStrokeEnd = {
+                                if (currentPoints.isNotEmpty()) {
+                                    strokes.add(CanvasStroke(points = currentPoints.toList(), color = activeColor, baseWidth = baseStrokeWidth))
+                                    currentPoints.clear()
+                                    onStrokeAdded()
+                                }
+                            },
+                            onObjectTouchDown = { world ->
+                                if (!shapesInteractive) {
                                     false
+                                } else {
+                                    val started = beginShapeDrag(shapes, currentSelectedId, notes, world, currentScale, density)
+                                    if (started != null) {
+                                        currentOnSelect(started.start.id)
+                                        selectedStroke = null
+                                        drag = started
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                            },
+                            onObjectDrag = { world ->
+                                drag?.let { d ->
+                                    val index = shapes.indexOfFirst { it.id == d.start.id }
+                                    if (index >= 0) {
+                                        val minSize = with(density) { 28.dp.toPx() } / currentScale
+                                        shapes[index] = applyShapeDrag(d, world, minSize)
+                                    }
+                                }
+                            },
+                            onObjectTouchUp = { moved ->
+                                val finished = drag
+                                drag = null
+                                // Persist once per gesture instead of on every move event.
+                                if (moved && finished != null) currentOnShapesChanged()
+                            },
+                            onEmptyTap = { world ->
+                                // Tap on a pen stroke selects it (so it can be recoloured / deleted).
+                                val tolerance = with(density) { 14.dp.toPx() } / currentScale
+                                selectedStroke = strokes.lastOrNull { it.hitTest(world, tolerance) }
+                                currentOnSelect(null)
+                            },
+                            onErase = { world ->
+                                val tolerance = with(density) { 12.dp.toPx() } / currentScale
+                                if (strokes.removeAll { it.hitTest(world, tolerance) }) erasedSomething[0] = true
+                            },
+                            onEraseEnd = {
+                                // Persist once per erase gesture.
+                                if (erasedSomething[0]) {
+                                    erasedSomething[0] = false
+                                    onStrokeAdded()
                                 }
                             }
-                        },
-                        onObjectDrag = { world ->
-                            drag?.let { d ->
-                                val index = shapes.indexOfFirst { it.id == d.start.id }
-                                if (index >= 0) {
-                                    val minSize = with(density) { 28.dp.toPx() } / currentScale
-                                    shapes[index] = applyShapeDrag(d, world, minSize)
-                                }
-                            }
-                        },
-                        onObjectTouchUp = { moved ->
-                            val finished = drag
-                            drag = null
-                            // Persist once per gesture instead of on every move event.
-                            if (moved && finished != null) currentOnShapesChanged()
-                        },
-                        onEmptyTap = { currentOnSelect(null) }
-                    )
+                        )
+                    }
+                }
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                withTransform({
+                    translate(left = canvasOffset.x, top = canvasOffset.y)
+                    scale(scaleX = scale, scaleY = scale, pivot = Offset.Zero)
+                }) {
+                    shapes.forEach { shape -> drawBoardShape(shape) }
+                    selectedStroke?.let { sel ->
+                        drawSmoothPressureStroke(
+                            CanvasStroke(points = sel.points, color = Color(0x802196F3), baseWidth = sel.baseWidth + 14f)
+                        )
+                    }
+                    strokes.forEach { stroke -> drawSmoothPressureStroke(stroke) }
+                    if (currentPoints.isNotEmpty()) {
+                        drawSmoothPressureStroke(CanvasStroke(points = currentPoints, color = activeColor, baseWidth = baseStrokeWidth))
+                    }
+                    if (shapesInteractive) {
+                        shapes.firstOrNull { it.id == selectedShapeId }?.let { drawSelectionOverlay(it, scale) }
+                    }
                 }
             }
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            withTransform({
-                translate(left = canvasOffset.x, top = canvasOffset.y)
-                scale(scaleX = scale, scaleY = scale, pivot = Offset.Zero)
-            }) {
-                shapes.forEach { shape -> drawBoardShape(shape) }
-                strokes.forEach { stroke -> drawSmoothPressureStroke(stroke) }
-                if (currentPoints.isNotEmpty()) {
-                    drawSmoothPressureStroke(CanvasStroke(points = currentPoints, color = activeColor, baseWidth = baseStrokeWidth))
-                }
-                if (shapesInteractive) {
-                    shapes.firstOrNull { it.id == selectedShapeId }?.let { drawSelectionOverlay(it, scale) }
-                }
-            }
-        }
 
-        notes.forEach { note ->
-            StickyNoteItem(
-                note = note,
-                scale = scale,
-                canvasOffset = canvasOffset,
-                onNoteChanged = onNoteChanged,
+            notes.forEach { note ->
+                StickyNoteItem(
+                    note = note,
+                    scale = scale,
+                    canvasOffset = canvasOffset,
+                    onNoteChanged = onNoteChanged,
+                    onDelete = {
+                        notes.remove(note)
+                        onNoteChanged()
+                    }
+                )
+            }
+
+        } // end of gesture surface
+
+        // Floating action bar above the selected pen stroke.
+        val strokeSel = if (shapesInteractive && drag == null) selectedStroke else null
+        if (strokeSel != null && strokeSel.points.isNotEmpty()) {
+            val strokeScreenPts = strokeSel.points.map { it.position * scale + canvasOffset }
+            ShapeContextBar(
+                shapeId = "stroke-" + System.identityHashCode(strokeSel),
+                centerX = (strokeScreenPts.minOf { it.x } + strokeScreenPts.maxOf { it.x }) / 2f,
+                topY = strokeScreenPts.minOf { it.y },
+                bottomY = strokeScreenPts.maxOf { it.y },
+                gapPx = with(density) { 40.dp.toPx() },
+                minTopPx = with(density) { 120.dp.toPx() },
+                currentColor = strokeSel.color.toArgb().toLong() and 0xFFFFFFFFL,
+                onColor = { c ->
+                    val i = strokes.indexOfFirst { it === strokeSel }
+                    if (i >= 0) {
+                        val recoloured = CanvasStroke(points = strokeSel.points, color = Color(c), baseWidth = strokeSel.baseWidth)
+                        strokes[i] = recoloured
+                        selectedStroke = recoloured
+                        onStrokeAdded()
+                    }
+                },
+                onDuplicate = null,
+                onBringToFront = null,
                 onDelete = {
-                    notes.remove(note)
-                    onNoteChanged()
+                    strokes.removeAll { it === strokeSel }
+                    selectedStroke = null
+                    onStrokeAdded()
                 }
             )
         }
@@ -1064,17 +1183,22 @@ suspend fun PointerInputScope.detectCanvasGestures(
     onStrokeStart: (CanvasStrokePoint) -> Unit,
     onStrokeMove: (CanvasStrokePoint) -> Unit,
     onStrokeEnd: () -> Unit,
+    isEraserActive: Boolean = false,
+    // Called for every finger position (world coordinates) while the eraser is down.
+    onErase: (world: Offset) -> Unit = {},
+    onEraseEnd: () -> Unit = {},
     // Return true from onObjectTouchDown when the touch grabbed a canvas object (e.g. a shape).
     onObjectTouchDown: (world: Offset) -> Boolean = { false },
     onObjectDrag: (world: Offset) -> Unit = {},
     onObjectTouchUp: (moved: Boolean) -> Unit = {},
-    onEmptyTap: () -> Unit = {}
+    onEmptyTap: (world: Offset) -> Unit = {}
 ) {
     awaitEachGesture {
         val firstDown = awaitFirstDown(requireUnconsumed = false)
         val slop = viewConfiguration.touchSlop
         val downPosition = firstDown.position
         var isDrawing = false
+        var isErasing = false
         var isDraggingObject = false
         var objectMoved = false
         var canvasMoved = false
@@ -1083,6 +1207,10 @@ suspend fun PointerInputScope.detectCanvasGestures(
             isDrawing = true
             val worldPos = convertScreenToWorld(firstDown.position, getCanvasOffset(), getScale())
             onStrokeStart(CanvasStrokePoint(worldPos, firstDown.pressure.coerceIn(0.1f, 1.0f)))
+            firstDown.consume()
+        } else if (isEraserActive) {
+            isErasing = true
+            onErase(convertScreenToWorld(downPosition, getCanvasOffset(), getScale()))
             firstDown.consume()
         } else if (onObjectTouchDown(convertScreenToWorld(downPosition, getCanvasOffset(), getScale()))) {
             isDraggingObject = true
@@ -1098,6 +1226,10 @@ suspend fun PointerInputScope.detectCanvasGestures(
                 if (isDrawing) {
                     isDrawing = false
                     onStrokeEnd()
+                }
+                if (isErasing) {
+                    isErasing = false
+                    onEraseEnd()
                 }
                 if (isDraggingObject) {
                     isDraggingObject = false
@@ -1118,13 +1250,19 @@ suspend fun PointerInputScope.detectCanvasGestures(
                     val worldPos = convertScreenToWorld(change.position, getCanvasOffset(), getScale())
                     onStrokeMove(CanvasStrokePoint(worldPos, change.pressure.coerceIn(0.1f, 1.0f)))
                     change.consume()
+                } else if (isErasing) {
+                    change.historical.forEach { historical ->
+                        onErase(convertScreenToWorld(historical.position, getCanvasOffset(), getScale()))
+                    }
+                    onErase(convertScreenToWorld(change.position, getCanvasOffset(), getScale()))
+                    change.consume()
                 } else if (isDraggingObject) {
                     if (!objectMoved && (change.position - downPosition).getDistance() > slop) objectMoved = true
                     if (objectMoved) {
                         onObjectDrag(convertScreenToWorld(change.position, getCanvasOffset(), getScale()))
                     }
                     change.consume()
-                } else if (!isPenActive) {
+                } else if (!isPenActive && !isEraserActive) {
                     if ((change.position - downPosition).getDistance() > slop) canvasMoved = true
                     val pan = event.calculatePan()
                     onTransform(pan, 1f, change.position)
@@ -1134,10 +1272,11 @@ suspend fun PointerInputScope.detectCanvasGestures(
         } while (event.changes.any { it.pressed })
 
         if (isDrawing) onStrokeEnd()
+        if (isErasing) onEraseEnd()
         if (isDraggingObject) {
             onObjectTouchUp(objectMoved)
-        } else if (!isPenActive && !canvasMoved) {
-            onEmptyTap()
+        } else if (!isPenActive && !isEraserActive && !canvasMoved) {
+            onEmptyTap(convertScreenToWorld(downPosition, getCanvasOffset(), getScale()))
         }
     }
 }
@@ -1825,8 +1964,8 @@ private fun ShapeContextBar(
     minTopPx: Float,
     currentColor: Long,
     onColor: (Long) -> Unit,
-    onDuplicate: () -> Unit,
-    onBringToFront: () -> Unit,
+    onDuplicate: (() -> Unit)?,
+    onBringToFront: (() -> Unit)?,
     onDelete: () -> Unit
 ) {
     var showColors by remember(shapeId) { mutableStateOf(false) }
@@ -1874,15 +2013,85 @@ private fun ShapeContextBar(
                 IconButton(onClick = { showColors = true }, modifier = Modifier.size(40.dp)) {
                     Icon(Icons.Default.Palette, contentDescription = "Color")
                 }
-                IconButton(onClick = onDuplicate, modifier = Modifier.size(40.dp)) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate")
+                if (onDuplicate != null) {
+                    IconButton(onClick = onDuplicate, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate")
+                    }
                 }
-                IconButton(onClick = onBringToFront, modifier = Modifier.size(40.dp)) {
-                    Icon(Icons.Default.FlipToFront, contentDescription = "Bring to front")
+                if (onBringToFront != null) {
+                    IconButton(onClick = onBringToFront, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Default.FlipToFront, contentDescription = "Bring to front")
+                    }
                 }
                 IconButton(onClick = onDelete, modifier = Modifier.size(40.dp)) {
                     Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
                 }
+            }
+        }
+    }
+}
+
+// --- 4. PEN COLOURS, ERASER, STROKE SELECTION ---
+
+private val PEN_PALETTE = listOf(
+    0xFFFFFFFFL, 0xFF5BC0F8L, 0xFFFF6B6BL, 0xFFFFA94DL,
+    0xFFFFE066L, 0xFF69DB7CL, 0xFFB197FCL, 0xFFF783ACL
+)
+
+/** Eraser glyph (Material "ink eraser" outline), built by hand because the icon set may not ship it. */
+private val EraserIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "Eraser",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).addPath(
+        pathData = PathParser().parsePathString(
+            "M16.24,3.56l4.95,4.94c0.78,0.79 0.78,2.05 0,2.84L12,20.53a4.008,4.008 0,0 1,-5.66,0L2.81,17c-0.78,-0.79 -0.78,-2.05 0,-2.84l10.6,-10.6c0.79,-0.78 2.05,-0.78 2.83,0zM4.22,15.58l3.54,3.53c0.78,0.79 2.04,0.79 2.83,0l3.53,-3.53 -4.95,-4.95 -4.95,4.95z"
+        ).toNodes(),
+        fill = SolidColor(Color.Black)
+    ).build()
+}
+
+/** True when [world] is within [tolerance] (plus half the pen width) of any segment of the stroke. */
+private fun CanvasStroke.hitTest(world: Offset, tolerance: Float): Boolean {
+    val pts = points
+    if (pts.isEmpty()) return false
+    val reach = tolerance + baseWidth / 2f
+    if (pts.size == 1) return (pts[0].position - world).getDistance() <= reach
+    for (i in 1 until pts.size) {
+        if (distanceToSegment(world, pts[i - 1].position, pts[i].position) <= reach) return true
+    }
+    return false
+}
+
+@Composable
+private fun PenColorPopup(selected: Color, onPick: (Color) -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.shadow(12.dp, RoundedCornerShape(24.dp)),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            PEN_PALETTE.forEach { c ->
+                val color = Color(c)
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(color)
+                        .then(
+                            if (color == selected) Modifier.border(3.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                            else Modifier.border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+                        )
+                        .clickable { onPick(color) }
+                        .semantics { contentDescription = "Pen colour" }
+                )
             }
         }
     }
