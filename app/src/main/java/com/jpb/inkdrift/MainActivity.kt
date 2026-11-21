@@ -51,6 +51,7 @@ import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -297,6 +298,12 @@ fun FreeformMainDashboardScreen(
     var showCreateDialog by remember { mutableStateOf(false) }
     var newBoardTitleInput by remember { mutableStateOf("") }
 
+    val filteredBoards = if (searchQuery.isBlank()) {
+        boards
+    } else {
+        boards.filter { it.title.contains(searchQuery.trim(), ignoreCase = true) }
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -348,11 +355,21 @@ fun FreeformMainDashboardScreen(
                         OutlinedTextField(
                             value = searchQuery,
                             onValueChange = { searchQuery = it },
-                            placeholder = { Text("Search") },
+                            placeholder = { Text("Search", style = MaterialTheme.typography.bodyMedium) },
                             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            trailingIcon = {
+                                if (searchQuery.isNotEmpty()) {
+                                    IconButton(onClick = { searchQuery = "" }) {
+                                        Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                                    }
+                                }
+                            },
                             shape = RoundedCornerShape(24.dp),
                             singleLine = true,
-                            modifier = Modifier.fillMaxWidth(0.7f).height(48.dp)
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier
+                                .fillMaxWidth(0.7f)
+                                .defaultMinSize(minHeight = 44.dp)
                         )
                     },
                     navigationIcon = {
@@ -392,6 +409,17 @@ fun FreeformMainDashboardScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                } else if (filteredBoards.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "No boards matching \"$searchQuery\"",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 } else {
                     LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = 160.dp),
@@ -399,7 +427,7 @@ fun FreeformMainDashboardScreen(
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(boards) { board ->
+                        items(filteredBoards, key = { it.id }) { board ->
                             DashboardBoardCard(
                                 board = board,
                                 onClick = { onBoardClick(board.id, board.title) },
@@ -1841,9 +1869,10 @@ fun ShapePickerPopup(onPick: (ShapeType) -> Unit, modifier: Modifier = Modifier)
                             focusedBorderColor = MaterialTheme.colorScheme.primary,
                             unfocusedBorderColor = Color.Transparent
                         ),
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
+                            .defaultMinSize(minHeight = 44.dp)
                     )
                 } else {
                     Text(
